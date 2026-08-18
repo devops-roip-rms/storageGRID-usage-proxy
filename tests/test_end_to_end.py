@@ -8,14 +8,20 @@ import tempfile
 import threading
 import unittest
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "storagegrid_usage_proxy.py"
-spec = importlib.util.spec_from_file_location("storagegrid_usage_proxy_e2e", MODULE_PATH)
+spec = importlib.util.spec_from_file_location("storagegrid_usage_proxy_e2e", str(MODULE_PATH))
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 assert spec.loader
 spec.loader.exec_module(mod)
+
+
+class TestThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 class FakeStorageGridHandler(BaseHTTPRequestHandler):
@@ -38,26 +44,52 @@ class FakeStorageGridHandler(BaseHTTPRequestHandler):
         if self.path != "/api/v4/authorize":
             self._json(404, {"error": "not_found"})
             return
+
+        if self.headers.get("Authorization") != "Bearer 00000000-0000-0000-0000-000000000000":
+            self._json(401, {"error": "missing_bootstrap_authorization"})
+            return
+        if self.headers.get("X-Csrf-Token") != "00000000000000000000000000000000":
+            self._json(401, {"error": "missing_csrf_header"})
+            return
+        if self.headers.get("Accept") != "application/json":
+            self._json(400, {"error": "bad_accept"})
+            return
+        if self.headers.get("Content-Type") != "application/json":
+            self._json(400, {"error": "bad_content_type"})
+            return
+
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
         if payload != {
+            "accountId": "tenant-123",
             "username": "monitoring-user",
             "password": "secret-password",
-            "accountId": "tenant-123",
+            "cookie": True,
+            "csrfToken": False,
         }:
-            self._json(401, {"error": "bad_credentials"})
+            self._json(401, {"error": "bad_credentials_or_body"})
             return
+
         type(self).auth_count += 1
-        token = f"TOKEN_{type(self).auth_count}"
+        token = "TOKEN_{0}".format(type(self).auth_count)
         type(self).valid_token = token
-        self._json(200, {"status": "success", "data": token})
+        self._json(
+            200,
+            {
+                "responseTime": "2026-08-18T09:01:56.498Z",
+                "status": "success",
+                "apiVersion": "4.0",
+                "deprecated": False,
+                "data": token,
+            },
+        )
 
     def do_GET(self):
         if self.path != "/api/v4/org/usage":
             self._json(404, {"error": "not_found"})
             return
         type(self).usage_count += 1
-        expected = f"Bearer {type(self).valid_token}"
+        expected = "Bearer {0}".format(type(self).valid_token)
         if self.headers.get("Authorization") != expected:
             self._json(401, {"error": "invalid_token"})
             return
@@ -71,8 +103,9 @@ class EndToEndTests(unittest.TestCase):
         FakeStorageGridHandler.valid_token = None
 
     def test_cli_env_file_upstream_test(self):
-        upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeStorageGridHandler)
-        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream = TestThreadingHTTPServer(("127.0.0.1", 0), FakeStorageGridHandler)
+        upstream_thread = threading.Thread(target=upstream.serve_forever)
+        upstream_thread.daemon = True
         upstream_thread.start()
         try:
             with tempfile.TemporaryDirectory() as td:
@@ -80,7 +113,7 @@ class EndToEndTests(unittest.TestCase):
                 env_file.write_text(
                     "\n".join(
                         [
-                            f"STORAGEGRID_BASE_URL=http://127.0.0.1:{upstream.server_port}",
+                            "STORAGEGRID_BASE_URL=http://127.0.0.1:{0}".format(upstream.server_port),
                             "STORAGEGRID_USERNAME=monitoring-user",
                             "STORAGEGRID_ACCOUNT_ID=tenant-123",
                             "STORAGEGRID_PASSWORD=secret-password",
@@ -96,8 +129,9 @@ class EndToEndTests(unittest.TestCase):
                 )
                 result = subprocess.run(
                     [sys.executable, str(MODULE_PATH), "--env-file", str(env_file), "--test-upstream"],
-                    text=True,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
                     timeout=5,
                     check=False,
                 )
@@ -113,17 +147,17 @@ class EndToEndTests(unittest.TestCase):
             upstream_thread.join(timeout=2)
 
     def test_real_http_flow_and_401_recovery(self):
-        upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeStorageGridHandler)
-        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream = TestThreadingHTTPServer(("127.0.0.1", 0), FakeStorageGridHandler)
+        upstream_thread = threading.Thread(target=upstream.serve_forever)
+        upstream_thread.daemon = True
         upstream_thread.start()
 
         proxy = None
         proxy_thread = None
         try:
             with tempfile.TemporaryDirectory() as td:
-                tmp = pathlib.Path(td)
                 cfg = mod.Config(
-                    base_url=f"http://127.0.0.1:{upstream.server_port}",
+                    base_url="http://127.0.0.1:{0}".format(upstream.server_port),
                     username="monitoring-user",
                     account_id="tenant-123",
                     password="secret-password",
@@ -148,17 +182,16 @@ class EndToEndTests(unittest.TestCase):
 
                 app = mod.ProxyApplication(cfg, client, manager, None)
                 proxy = mod.ProxyHTTPServer(("127.0.0.1", 0), app)
-                proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+                proxy_thread = threading.Thread(target=proxy.serve_forever)
+                proxy_thread.daemon = True
                 proxy_thread.start()
-                url = f"http://127.0.0.1:{proxy.server_port}/storagegrid/usage"
+                url = "http://127.0.0.1:{0}/storagegrid/usage".format(proxy.server_port)
 
                 with urllib.request.urlopen(url, timeout=2) as response:
                     first = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(first["data"]["objectCount"], 42)
                 self.assertEqual(FakeStorageGridHandler.auth_count, 1)
 
-                # Simulate server-side rejection/expiration of TOKEN_1. The proxy
-                # must authorize once, validate TOKEN_2, then retry usage once.
                 FakeStorageGridHandler.valid_token = "SERVER_INVALIDATED_TOKEN_1"
                 with urllib.request.urlopen(url, timeout=2) as response:
                     recovered = json.loads(response.read().decode("utf-8"))

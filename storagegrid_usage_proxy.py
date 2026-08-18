@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """StorageGRID Tenant API usage proxy for HTTP-SNIFFER.
 
-The service owns the short-lived StorageGRID bearer token in memory. It refreshes
-and validates a new token on a configurable interval (10 hours by default), then
-serves a stable local GET endpoint that HTTP-SNIFFER can call without knowing or
-persisting the StorageGRID bearer token.
+Python 3.6+ and standard-library only.
 
-No third-party Python packages are required.
+The service owns the StorageGRID bearer token in memory. It refreshes and
+validates a new token every 10 hours by default, then exposes a stable local
+GET endpoint that HTTP-SNIFFER can call without storing the StorageGRID token.
 """
-
-from __future__ import annotations
 
 import argparse
 import hmac
@@ -25,14 +22,19 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from socketserver import ThreadingMixIn
 
 LOG = logging.getLogger("storagegrid-usage-proxy")
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / "config" / "proxy.env"
+
+# These non-secret bootstrap values come directly from the working StorageGRID
+# v4 authorize curl supplied for this environment. They can be overridden in
+# proxy.env, but normally should not need to be changed.
+DEFAULT_AUTH_BOOTSTRAP_BEARER = "00000000-0000-0000-0000-000000000000"
+DEFAULT_AUTH_CSRF_HEADER_VALUE = "00000000000000000000000000000000"
 
 
 class ProxyError(RuntimeError):
@@ -42,48 +44,74 @@ class ProxyError(RuntimeError):
 class UpstreamHTTPError(ProxyError):
     """StorageGRID returned a non-2xx HTTP response."""
 
-    def __init__(self, status: int, url: str) -> None:
+    def __init__(self, status, url):
         self.status = status
         self.url = url
-        super().__init__(f"StorageGRID returned HTTP {status} for {url}")
+        ProxyError.__init__(self, "StorageGRID returned HTTP {0} for {1}".format(status, url))
 
 
-@dataclass(frozen=True)
-class UpstreamResponse:
-    status: int
-    body: bytes
-    content_type: str
+class UpstreamResponse(object):
+    def __init__(self, status, body, content_type):
+        self.status = status
+        self.body = body
+        self.content_type = content_type
 
 
-@dataclass(frozen=True)
-class Config:
-    base_url: str
-    username: str
-    account_id: str
-    password: str
-    auth_path: str
-    usage_path: str
-    http_timeout: float
-    max_response_bytes: int
-    tls_verify: bool
-    ca_bundle: str | None
-    refresh_interval_seconds: float
-    refresh_retry_seconds: float
-    bind_host: str
-    bind_port: int
-    proxy_api_key: str | None
-    log_level: str
+class Config(object):
+    def __init__(
+        self,
+        base_url,
+        username,
+        account_id,
+        password,
+        auth_path,
+        usage_path,
+        http_timeout,
+        max_response_bytes,
+        tls_verify,
+        ca_bundle,
+        refresh_interval_seconds,
+        refresh_retry_seconds,
+        bind_host,
+        bind_port,
+        proxy_api_key,
+        log_level,
+        auth_bootstrap_bearer=DEFAULT_AUTH_BOOTSTRAP_BEARER,
+        auth_csrf_header_value=DEFAULT_AUTH_CSRF_HEADER_VALUE,
+        auth_cookie=True,
+        auth_csrf_token=False,
+    ):
+        self.base_url = base_url
+        self.username = username
+        self.account_id = account_id
+        self.password = password
+        self.auth_path = auth_path
+        self.usage_path = usage_path
+        self.http_timeout = http_timeout
+        self.max_response_bytes = max_response_bytes
+        self.tls_verify = tls_verify
+        self.ca_bundle = ca_bundle
+        self.refresh_interval_seconds = refresh_interval_seconds
+        self.refresh_retry_seconds = refresh_retry_seconds
+        self.bind_host = bind_host
+        self.bind_port = bind_port
+        self.proxy_api_key = proxy_api_key
+        self.log_level = log_level
+        self.auth_bootstrap_bearer = auth_bootstrap_bearer
+        self.auth_csrf_header_value = auth_csrf_header_value
+        self.auth_cookie = auth_cookie
+        self.auth_csrf_token = auth_csrf_token
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls):
         base_url = validate_base_url(required_env("STORAGEGRID_BASE_URL"))
+
         refresh_hours = env_float("TOKEN_REFRESH_HOURS", 10.0)
         if refresh_hours <= 0:
             raise ProxyError("TOKEN_REFRESH_HOURS must be greater than 0")
         if refresh_hours >= 16:
             LOG.warning(
-                "TOKEN_REFRESH_HOURS is %.2f. StorageGRID bearer tokens are normally "
-                "documented with a 16-hour lifetime; configure a safety margin.",
+                "TOKEN_REFRESH_HOURS is %.2f; configure a safety margin below the token lifetime",
                 refresh_hours,
             )
 
@@ -103,15 +131,25 @@ class Config:
         if max_response_bytes < 1024:
             raise ProxyError("MAX_RESPONSE_BYTES must be at least 1024")
 
-        password = required_env("STORAGEGRID_PASSWORD")
-        proxy_api_key = os.getenv("PROXY_API_KEY", "").strip() or None
         ca_bundle_raw = os.getenv("CA_BUNDLE", "").strip()
+        proxy_api_key = os.getenv("PROXY_API_KEY", "").strip() or None
+
+        auth_bootstrap_bearer = os.getenv(
+            "AUTH_BOOTSTRAP_BEARER", DEFAULT_AUTH_BOOTSTRAP_BEARER
+        ).strip()
+        auth_csrf_header_value = os.getenv(
+            "AUTH_CSRF_HEADER_VALUE", DEFAULT_AUTH_CSRF_HEADER_VALUE
+        ).strip()
+        if not auth_bootstrap_bearer:
+            raise ProxyError("AUTH_BOOTSTRAP_BEARER cannot be empty")
+        if not auth_csrf_header_value:
+            raise ProxyError("AUTH_CSRF_HEADER_VALUE cannot be empty")
 
         return cls(
             base_url=base_url,
             username=required_env("STORAGEGRID_USERNAME"),
             account_id=required_env("STORAGEGRID_ACCOUNT_ID"),
-            password=password,
+            password=required_env("STORAGEGRID_PASSWORD"),
             auth_path=normalize_path(os.getenv("AUTH_PATH", "/api/v4/authorize")),
             usage_path=normalize_path(os.getenv("USAGE_PATH", "/api/v4/org/usage")),
             http_timeout=timeout,
@@ -124,28 +162,27 @@ class Config:
             bind_port=port,
             proxy_api_key=proxy_api_key,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            auth_bootstrap_bearer=auth_bootstrap_bearer,
+            auth_csrf_header_value=auth_csrf_header_value,
+            auth_cookie=env_bool("AUTH_COOKIE", True),
+            auth_csrf_token=env_bool("AUTH_CSRF_TOKEN", False),
         )
 
 
-
-def resolve_project_path(value: str) -> Path:
-    """Resolve config paths relative to the dedicated project directory."""
+def resolve_project_path(value):
+    """Resolve config paths relative to this dedicated project directory."""
     path = Path(value).expanduser()
     if path.is_absolute():
         return path
     return (PROJECT_ROOT / path).resolve()
 
 
-def load_env_file(path: Path) -> None:
-    """Load a simple KEY=VALUE file without third-party dependencies.
-
-    The selected env file is authoritative for keys it defines.
-    Relative certificate paths are resolved later against PROJECT_ROOT.
-    """
+def load_env_file(path):
+    """Load a simple KEY=VALUE file without third-party packages."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
-        raise ProxyError(f"Cannot read configuration file {path}: {exc}") from exc
+        raise ProxyError("Cannot read configuration file {0}: {1}".format(path, exc))
 
     for lineno, raw_line in enumerate(lines, start=1):
         line = raw_line.strip()
@@ -154,109 +191,127 @@ def load_env_file(path: Path) -> None:
         if line.startswith("export "):
             line = line[7:].lstrip()
         if "=" not in line:
-            raise ProxyError(f"Invalid configuration line {lineno} in {path}: expected KEY=VALUE")
+            raise ProxyError(
+                "Invalid configuration line {0} in {1}: expected KEY=VALUE".format(
+                    lineno, path
+                )
+            )
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
-        if not key or not all(ch.isalnum() or ch == "_" for ch in key) or key[0].isdigit():
-            raise ProxyError(f"Invalid configuration key on line {lineno} in {path}")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        if (
+            not key
+            or not all(ch.isalnum() or ch == "_" for ch in key)
+            or key[0].isdigit()
+        ):
+            raise ProxyError("Invalid configuration key on line {0} in {1}".format(lineno, path))
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
         os.environ[key] = value
 
 
-def required_env(name: str) -> str:
+def _looks_like_placeholder(value):
+    upper = value.upper()
+    if "CHANGE_ME" in upper:
+        return True
+    if "<" in value or ">" in value:
+        return True
+    if upper.startswith("YOUR_") or upper.startswith("REPLACE_"):
+        return True
+    return False
+
+
+def required_env(name):
     value = os.getenv(name, "").strip()
     if not value:
-        raise ProxyError(f"Required environment variable is missing: {name}")
-    if "CHANGE_ME" in value:
-        raise ProxyError(f"Required environment variable still contains a placeholder: {name}")
+        raise ProxyError("Required environment variable is missing: {0}".format(name))
+    if _looks_like_placeholder(value):
+        raise ProxyError(
+            "Required environment variable still contains a placeholder: {0}".format(name)
+        )
     return value
 
 
-
-def validate_base_url(value: str) -> str:
+def validate_base_url(value):
     """Validate and normalize the StorageGRID base URL."""
     value = value.strip().rstrip("/")
     parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ProxyError("STORAGEGRID_BASE_URL must be a valid http:// or https:// URL")
+    if "<" in parsed.netloc or ">" in parsed.netloc:
+        raise ProxyError("STORAGEGRID_BASE_URL still contains a placeholder")
     if parsed.query or parsed.fragment:
         raise ProxyError("STORAGEGRID_BASE_URL must not contain a query string or fragment")
-    if parsed.path not in {"", "/"}:
+    if parsed.path not in ("", "/"):
         raise ProxyError(
             "STORAGEGRID_BASE_URL must contain only scheme and host[:port]; "
             "put /api/v4/... values in AUTH_PATH and USAGE_PATH"
         )
     return value
 
-def env_bool(name: str, default: bool) -> bool:
+
+def env_bool(name, default):
     raw = os.getenv(name)
     if raw is None:
         return default
     value = raw.strip().lower()
-    if value in {"1", "true", "yes", "on"}:
+    if value in ("1", "true", "yes", "on"):
         return True
-    if value in {"0", "false", "no", "off"}:
+    if value in ("0", "false", "no", "off"):
         return False
-    raise ProxyError(f"{name} must be true/false, got {raw!r}")
+    raise ProxyError("{0} must be true/false, got {1!r}".format(name, raw))
 
 
-def env_float(name: str, default: float) -> float:
+def env_float(name, default):
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
     try:
         return float(raw)
-    except ValueError as exc:
-        raise ProxyError(f"{name} must be numeric, got {raw!r}") from exc
+    except ValueError:
+        raise ProxyError("{0} must be numeric, got {1!r}".format(name, raw))
 
 
-def env_int(name: str, default: int) -> int:
+def env_int(name, default):
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
     try:
         return int(raw)
-    except ValueError as exc:
-        raise ProxyError(f"{name} must be an integer, got {raw!r}") from exc
+    except ValueError:
+        raise ProxyError("{0} must be an integer, got {1!r}".format(name, raw))
 
 
-def normalize_path(value: str) -> str:
+def normalize_path(value):
     value = value.strip()
     if not value:
         raise ProxyError("API path cannot be empty")
     return value if value.startswith("/") else "/" + value
 
 
-def build_ssl_context(cfg: Config) -> ssl.SSLContext:
+def build_ssl_context(cfg):
     if not cfg.tls_verify:
         LOG.warning("TLS certificate verification is DISABLED")
-        return ssl._create_unverified_context()  # noqa: SLF001
+        return ssl._create_unverified_context()
     if cfg.ca_bundle:
+        if not Path(cfg.ca_bundle).is_file():
+            raise ProxyError("CA_BUNDLE file does not exist: {0}".format(cfg.ca_bundle))
         return ssl.create_default_context(cafile=cfg.ca_bundle)
     return ssl.create_default_context()
 
 
-class StorageGridClient:
-    def __init__(self, cfg: Config, context: ssl.SSLContext) -> None:
+class StorageGridClient(object):
+    def __init__(self, cfg, context):
         self.cfg = cfg
         self.context = context
 
-    def _request(
-        self,
-        path: str,
-        *,
-        method: str,
-        headers: dict[str, str] | None = None,
-        json_body: dict[str, Any] | None = None,
-    ) -> UpstreamResponse:
+    def _request(self, path, method, headers=None, json_body=None):
         url = self.cfg.base_url + path
         request_headers = {"Accept": "application/json"}
         if headers:
             request_headers.update(headers)
 
-        data: bytes | None = None
+        data = None
         if json_body is not None:
             data = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
             request_headers["Content-Type"] = "application/json"
@@ -277,65 +332,79 @@ class StorageGridClient:
                 body = response.read(self.cfg.max_response_bytes + 1)
                 if len(body) > self.cfg.max_response_bytes:
                     raise ProxyError(
-                        f"StorageGRID response exceeded MAX_RESPONSE_BYTES for {url}"
+                        "StorageGRID response exceeded MAX_RESPONSE_BYTES for {0}".format(url)
                     )
                 status = int(response.status)
                 content_type = response.headers.get("Content-Type", "application/json")
         except urllib.error.HTTPError as exc:
-            # Do not include an upstream error body in logs/exceptions. Authentication
-            # endpoints should never have a chance to echo sensitive request material.
             try:
                 exc.read(min(self.cfg.max_response_bytes, 4096))
             except Exception:
                 pass
-            raise UpstreamHTTPError(exc.code, url) from exc
+            raise UpstreamHTTPError(exc.code, url)
         except urllib.error.URLError as exc:
-            raise ProxyError(f"Connection failure for {url}: {exc.reason}") from exc
-        except TimeoutError as exc:
-            raise ProxyError(f"Timeout connecting to {url}") from exc
+            raise ProxyError("Connection failure for {0}: {1}".format(url, exc.reason))
+        except (TimeoutError, socket_timeout_error()) as exc:
+            raise ProxyError("Timeout connecting to {0}".format(url))
 
         if status < 200 or status >= 300:
             raise UpstreamHTTPError(status, url)
-        return UpstreamResponse(status=status, body=body, content_type=content_type)
+        return UpstreamResponse(status, body, content_type)
 
     @staticmethod
-    def _parse_json(response: UpstreamResponse, purpose: str) -> Any:
+    def _parse_json(response, purpose):
         try:
             return json.loads(response.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProxyError(f"StorageGRID returned invalid JSON for {purpose}") from exc
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ProxyError("StorageGRID returned invalid JSON for {0}".format(purpose))
 
-    def authorize(self) -> str:
-        password = self.cfg.password
+    def authorize(self):
+        # Match the known-working StorageGRID v4 curl exactly in semantics:
+        # bootstrap Authorization header, X-Csrf-Token header, cookie=true,
+        # csrfToken=false, plus accountId/username/password.
         response = self._request(
             self.cfg.auth_path,
             method="POST",
+            headers={
+                "Authorization": "Bearer " + self.cfg.auth_bootstrap_bearer,
+                "X-Csrf-Token": self.cfg.auth_csrf_header_value,
+            },
             json_body={
-                "username": self.cfg.username,
-                "password": password,
                 "accountId": self.cfg.account_id,
+                "username": self.cfg.username,
+                "password": self.cfg.password,
+                "cookie": self.cfg.auth_cookie,
+                "csrfToken": self.cfg.auth_csrf_token,
             },
         )
         payload = self._parse_json(response, "authorization")
         if not isinstance(payload, dict):
             raise ProxyError("StorageGRID authorization response must be a JSON object")
+        if payload.get("status") not in (None, "success"):
+            raise ProxyError("StorageGRID authorization response did not report success")
         return extract_token(payload)
 
-    def fetch_usage(self, token: str) -> UpstreamResponse:
+    def fetch_usage(self, token):
         response = self._request(
             self.cfg.usage_path,
             method="GET",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": "Bearer " + token},
         )
-        # Validate JSON before returning data to HTTP-SNIFFER. The original bytes
-        # are still returned unchanged so the proxy does not alter the payload.
+        # Validate JSON, but return the exact original bytes unchanged.
         self._parse_json(response, "usage")
         return response
 
 
-def extract_token(payload: dict[str, Any]) -> str:
+def socket_timeout_error():
+    # socket.timeout is an alias/subclass whose exact hierarchy varies across
+    # Python versions. Import lazily to keep the exception tuple portable.
+    import socket
+    return socket.timeout
+
+
+def extract_token(payload):
     data = payload.get("data")
-    candidates: list[Any] = []
+    candidates = []
     if isinstance(data, str):
         candidates.append(data)
     elif isinstance(data, dict):
@@ -351,42 +420,42 @@ def extract_token(payload: dict[str, Any]) -> str:
     raise ProxyError("Authorization response did not contain a recognizable token")
 
 
-class TokenManager:
+class TokenManager(object):
     """Owns the bearer token in RAM and refreshes it safely."""
 
-    def __init__(self, cfg: Config, client: StorageGridClient) -> None:
+    def __init__(self, cfg, client):
         self.cfg = cfg
         self.client = client
         self._state_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._token: str | None = None
-        self._last_success_epoch: float | None = None
+        self._thread = None
+        self._token = None
+        self._last_success_epoch = None
         self._next_refresh_monotonic = 0.0
-        self._last_error: str | None = None
+        self._last_error = None
         self._next_attempt_monotonic = 0.0
 
-    def start(self) -> None:
+    def start(self):
         if self._thread and self._thread.is_alive():
             return
         self._thread = threading.Thread(
             target=self._refresh_loop,
             name="storagegrid-token-refresh",
-            daemon=True,
         )
+        self._thread.daemon = True
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self):
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
 
-    def get_token(self) -> str | None:
+    def get_token(self):
         with self._state_lock:
             return self._token
 
-    def _perform_refresh_locked(self) -> bool:
+    def _perform_refresh_locked(self):
         LOG.info("Requesting a new StorageGRID bearer token")
         try:
             candidate = self.client.authorize()
@@ -408,19 +477,12 @@ class TokenManager:
             self._next_attempt_monotonic = self._next_refresh_monotonic
             self._last_error = None
         LOG.info(
-            "New StorageGRID token validated and installed in memory; next regular "
-            "refresh in %.2f hours",
+            "New StorageGRID token validated and installed in memory; next regular refresh in %.2f hours",
             self.cfg.refresh_interval_seconds / 3600.0,
         )
         return True
 
-    def refresh(self, *, force: bool = False) -> bool:
-        """Authorize and validate a candidate token before installing it.
-
-        Returns True when a new token was installed. Returns False when a normal
-        refresh is not due or a previous failure is still in retry backoff. On
-        failure, the previous token remains in RAM.
-        """
+    def refresh(self, force=False):
         with self._refresh_lock:
             now_mono = time.monotonic()
             with self._state_lock:
@@ -434,25 +496,30 @@ class TokenManager:
                     return False
             return self._perform_refresh_locked()
 
-    def refresh_rejected_token(self, rejected_token: str) -> bool:
-        """Refresh only if the rejected token is still the active token.
+    def refresh_rejected_token(self, rejected_token):
+        """Refresh a token rejected with 401, with outage backoff protection.
 
-        This prevents a burst of concurrent HTTP 401 responses from causing a
-        burst of duplicate authorization requests.
+        A normally healthy token is allowed to refresh immediately even though its
+        regular 10-hour refresh is not due. If that recovery attempt fails, later
+        sniffer requests respect REFRESH_RETRY_SECONDS instead of hammering the
+        authorize endpoint.
         """
         with self._refresh_lock:
+            now_mono = time.monotonic()
             with self._state_lock:
                 if self._token != rejected_token:
                     return False
+                if self._last_error is not None and now_mono < self._next_attempt_monotonic:
+                    return False
             return self._perform_refresh_locked()
 
-    def seconds_until_refresh(self) -> float:
+    def seconds_until_refresh(self):
         with self._state_lock:
             if self._token is None:
                 return 0.0
             return max(0.0, self._next_refresh_monotonic - time.monotonic())
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self):
         with self._state_lock:
             last_success = self._last_success_epoch
             token_loaded = self._token is not None
@@ -473,7 +540,7 @@ class TokenManager:
             "last_refresh_error": last_error is not None,
         }
 
-    def _refresh_loop(self) -> None:
+    def _refresh_loop(self):
         delay = 0.0
         while not self._stop_event.wait(delay):
             try:
@@ -487,11 +554,7 @@ class TokenManager:
                 delay = self.cfg.refresh_retry_seconds
 
 
-def get_usage_with_recovery(
-    client: StorageGridClient,
-    manager: TokenManager,
-) -> UpstreamResponse:
-    """Fetch live usage; reauthorize once if StorageGRID rejects the token with 401."""
+def get_usage_with_recovery(client, manager):
     token = manager.get_token()
     if token is None:
         LOG.info("No bearer token is loaded; authorizing on demand")
@@ -510,10 +573,12 @@ def get_usage_with_recovery(
         replacement = manager.get_token()
         if replacement is None:
             raise ProxyError("No StorageGRID token is available after HTTP 401 recovery")
+        if replacement == token:
+            raise ProxyError("StorageGRID token recovery is in retry backoff")
         return client.fetch_usage(replacement)
 
 
-def is_loopback_bind(host: str) -> bool:
+def is_loopback_bind(host):
     if host.lower() == "localhost":
         return True
     try:
@@ -522,20 +587,14 @@ def is_loopback_bind(host: str) -> bool:
         return False
 
 
-class ProxyApplication:
-    def __init__(
-        self,
-        cfg: Config,
-        client: StorageGridClient,
-        manager: TokenManager,
-        proxy_api_key: str | None,
-    ) -> None:
+class ProxyApplication(object):
+    def __init__(self, cfg, client, manager, proxy_api_key):
         self.cfg = cfg
         self.client = client
         self.manager = manager
         self.proxy_api_key = proxy_api_key
 
-    def authorized(self, supplied: str | None) -> bool:
+    def authorized(self, supplied):
         if self.proxy_api_key is None:
             return True
         if supplied is None:
@@ -543,26 +602,26 @@ class ProxyApplication:
         return hmac.compare_digest(supplied, self.proxy_api_key)
 
 
-class ProxyHTTPServer(ThreadingHTTPServer):
+class ProxyHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address: tuple[str, int], app: ProxyApplication) -> None:
+    def __init__(self, server_address, app):
         self.app = app
-        super().__init__(server_address, ProxyRequestHandler)
+        HTTPServer.__init__(self, server_address, ProxyRequestHandler)
 
 
 class ProxyRequestHandler(BaseHTTPRequestHandler):
-    server_version = "StorageGRIDUsageProxy/1.0"
+    server_version = "StorageGRIDUsageProxy/1.1"
 
     @property
-    def app(self) -> ProxyApplication:
-        return self.server.app  # type: ignore[attr-defined]
+    def app(self):
+        return self.server.app
 
-    def log_message(self, fmt: str, *args: Any) -> None:
+    def log_message(self, fmt, *args):
         LOG.debug("HTTP %s - %s", self.client_address[0], fmt % args)
 
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_json(self, status, payload):
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -571,7 +630,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_upstream(self, response: UpstreamResponse) -> None:
+    def _send_upstream(self, response):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
@@ -579,7 +638,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response.body)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
 
         if path == "/healthz":
@@ -608,10 +667,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             LOG.error("StorageGRID usage request failed: %s", exc)
             self._send_json(
                 502,
-                {
-                    "error": "storagegrid_http_error",
-                    "upstream_status": exc.status,
-                },
+                {"error": "storagegrid_http_error", "upstream_status": exc.status},
             )
             return
         except ProxyError as exc:
@@ -626,34 +682,30 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self._send_upstream(response)
 
 
-def load_proxy_api_key(cfg: Config) -> str | None:
-    return cfg.proxy_api_key
-
-
-def run_server(cfg: Config) -> int:
+def run_server(cfg):
     context = build_ssl_context(cfg)
     client = StorageGridClient(cfg, context)
     manager = TokenManager(cfg, client)
-    proxy_api_key = load_proxy_api_key(cfg)
 
-    if not is_loopback_bind(cfg.bind_host) and proxy_api_key is None:
+    if not is_loopback_bind(cfg.bind_host) and cfg.proxy_api_key is None:
         LOG.warning(
             "Proxy is bound to non-loopback host %s without PROXY_API_KEY. "
             "Restrict access with the host firewall or configure a proxy API key.",
             cfg.bind_host,
         )
 
-    app = ProxyApplication(cfg, client, manager, proxy_api_key)
+    app = ProxyApplication(cfg, client, manager, cfg.proxy_api_key)
     server = ProxyHTTPServer((cfg.bind_host, cfg.bind_port), app)
-
     stopping = threading.Event()
 
-    def request_stop(signum: int, _frame: Any) -> None:
+    def request_stop(signum, _frame):
         if stopping.is_set():
             return
         stopping.set()
         LOG.info("Received signal %s; stopping", signum)
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        thread = threading.Thread(target=server.shutdown)
+        thread.daemon = True
+        thread.start()
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
@@ -672,14 +724,14 @@ def run_server(cfg: Config) -> int:
     return 0
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level):
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--env-file",
@@ -689,12 +741,12 @@ def main() -> int:
     parser.add_argument(
         "--check-config",
         action="store_true",
-        help="Validate local configuration/TLS settings and exit without starting the server",
+        help="Validate local configuration/TLS settings and exit",
     )
     parser.add_argument(
         "--test-upstream",
         action="store_true",
-        help="Authorize once, validate with /org/usage, print a safe result, and exit",
+        help="Authorize once, validate with /org/usage, print safe result, and exit",
     )
     args = parser.parse_args()
 
@@ -704,19 +756,21 @@ def main() -> int:
         configure_logging(os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO")
         LOG.info("Loaded configuration from %s", env_file)
         cfg = Config.from_env()
-        load_proxy_api_key(cfg)
         context = build_ssl_context(cfg)
+
         if args.check_config:
             print("configuration_ok=yes")
             return 0
+
         if args.test_upstream:
             client = StorageGridClient(cfg, context)
             token = client.authorize()
             response = client.fetch_usage(token)
             print("upstream_test=ok")
-            print(f"usage_status={response.status}")
-            print(f"usage_bytes={len(response.body)}")
+            print("usage_status={0}".format(response.status))
+            print("usage_bytes={0}".format(len(response.body)))
             return 0
+
         return run_server(cfg)
     except ProxyError as exc:
         LOG.error("%s", exc)

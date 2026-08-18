@@ -70,6 +70,20 @@ class EnvFileTests(unittest.TestCase):
             with self.assertRaises(mod.ProxyError):
                 mod.required_env("X")
 
+    def test_angle_bracket_placeholder_is_rejected(self):
+        with mock.patch.dict("os.environ", {"X": "<USERNAME>"}, clear=True):
+            with self.assertRaises(mod.ProxyError):
+                mod.required_env("X")
+
+    def test_packaged_base_url_placeholder_is_rejected(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"STORAGEGRID_BASE_URL": "https://<STORAGEGRID_HOST_OR_IP>"},
+            clear=True,
+        ):
+            with self.assertRaises(mod.ProxyError):
+                mod.Config.from_env()
+
     def test_base_url_rejects_full_api_path(self):
         with self.assertRaises(mod.ProxyError):
             mod.validate_base_url("https://sg.example/api/v4/authorize")
@@ -135,6 +149,44 @@ class TokenManagerTests(unittest.TestCase):
             self.assertFalse(changed_second)
             self.assertEqual(client.authorize.call_count, 1)
             self.assertGreater(manager.seconds_until_refresh(), 9 * 3600)
+
+    def test_background_thread_refreshes_automatically_after_interval(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            cfg.refresh_interval_seconds = 0.10
+            cfg.refresh_retry_seconds = 0.05
+            client = mock.Mock()
+            client.authorize.side_effect = ["TOKEN1", "TOKEN2", "TOKEN3", "TOKEN4"]
+            client.fetch_usage.return_value = usage_response()
+            manager = mod.TokenManager(cfg, client)
+            manager.start()
+            try:
+                deadline = __import__("time").time() + 1.5
+                while manager.get_token() not in ("TOKEN3", "TOKEN4") and __import__("time").time() < deadline:
+                    __import__("time").sleep(0.02)
+                self.assertGreaterEqual(client.authorize.call_count, 3)
+                self.assertIn(manager.get_token(), ("TOKEN3", "TOKEN4"))
+            finally:
+                manager.stop()
+
+    def test_background_thread_retries_after_refresh_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            cfg.refresh_interval_seconds = 0.10
+            cfg.refresh_retry_seconds = 0.05
+            client = mock.Mock()
+            client.authorize.side_effect = [mod.ProxyError("temporary failure"), "RECOVERED"]
+            client.fetch_usage.return_value = usage_response()
+            manager = mod.TokenManager(cfg, client)
+            manager.start()
+            try:
+                deadline = __import__("time").time() + 1.5
+                while manager.get_token() != "RECOVERED" and __import__("time").time() < deadline:
+                    __import__("time").sleep(0.02)
+                self.assertEqual(manager.get_token(), "RECOVERED")
+                self.assertEqual(client.authorize.call_count, 2)
+            finally:
+                manager.stop()
 
     def test_token_never_appears_in_snapshot(self):
         with tempfile.TemporaryDirectory() as td:
@@ -216,6 +268,30 @@ class UsageRecoveryTests(unittest.TestCase):
             self.assertEqual(manager.get_token(), "NEW_TOKEN")
             self.assertEqual(json.loads(response.body), {"after_reauth": True})
             self.assertEqual(client.fetch_usage.call_args_list[-1], mock.call("NEW_TOKEN"))
+
+    def test_failed_401_reauthorization_enters_backoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            client = mock.Mock()
+            manager = mod.TokenManager(cfg, client)
+
+            client.authorize.return_value = "OLD_TOKEN"
+            client.fetch_usage.return_value = usage_response()
+            manager.refresh(force=True)
+
+            client.authorize.side_effect = mod.ProxyError("authorize unavailable")
+            client.fetch_usage.side_effect = mod.UpstreamHTTPError(
+                401, "https://sg/api/v4/org/usage"
+            )
+
+            with self.assertRaises(mod.ProxyError):
+                mod.get_usage_with_recovery(client, manager)
+            first_auth_count = client.authorize.call_count
+
+            # A second poll during retry backoff must not call authorize again.
+            with self.assertRaises(mod.ProxyError):
+                mod.get_usage_with_recovery(client, manager)
+            self.assertEqual(client.authorize.call_count, first_auth_count)
 
     def test_non_401_does_not_reauthorize(self):
         with tempfile.TemporaryDirectory() as td:
@@ -302,10 +378,20 @@ class ClientTests(unittest.TestCase):
             with mock.patch.object(client, "_request", return_value=auth_response) as request:
                 token = client.authorize()
             self.assertEqual(token, "TOKEN")
-            kwargs = request.call_args.kwargs
+            kwargs = request.call_args[1]
+            self.assertEqual(kwargs["json_body"]["accountId"], "tenant-123")
             self.assertEqual(kwargs["json_body"]["username"], "monitoring-user")
             self.assertEqual(kwargs["json_body"]["password"], "secret-password")
-            self.assertEqual(kwargs["json_body"]["accountId"], "tenant-123")
+            self.assertTrue(kwargs["json_body"]["cookie"])
+            self.assertFalse(kwargs["json_body"]["csrfToken"])
+            self.assertEqual(
+                kwargs["headers"]["Authorization"],
+                "Bearer 00000000-0000-0000-0000-000000000000",
+            )
+            self.assertEqual(
+                kwargs["headers"]["X-Csrf-Token"],
+                "00000000000000000000000000000000",
+            )
 
     def test_fetch_usage_preserves_original_json_bytes(self):
         with tempfile.TemporaryDirectory() as td:

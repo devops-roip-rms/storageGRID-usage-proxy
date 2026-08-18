@@ -1,63 +1,76 @@
-# Final Build Report
+# StorageGRID Usage Proxy - Final Build Report
 
-## Consolidation
+## Inputs incorporated
 
-This package combines the useful parts of the two previous variants:
+This build incorporates the confirmed environment details:
 
-- portable dedicated-folder configuration and start/stop scripts;
-- the complete proxy/token-manager implementation;
-- unit, HTTP, failure-path, and end-to-end tests;
-- closed-network/no-third-party-dependency behavior.
+- Splunk gateway Python: **3.6.8**.
+- StorageGRID authorize endpoint: `/api/v4/authorize`.
+- Usage endpoint: `/api/v4/org/usage`.
+- Known-working authorize request includes:
+  - `Accept: application/json`
+  - `Authorization: Bearer 00000000-0000-0000-0000-000000000000`
+  - `Content-Type: application/json`
+  - `X-Csrf-Token: 00000000000000000000000000000000`
+  - JSON `accountId`, `username`, `password`, `cookie: true`, `csrfToken: false`.
+- Known authorize response returns bearer token as string in `data`.
+- StorageGRID URL is HTTPS; supplied working curl does not use `-k`.
+- Deployment is in a dedicated folder on a closed-network server.
+- No application files may depend on `/etc`.
+- Proxy should start automatically after server reboot.
 
-The previous separate password-file requirement was removed so the only project file that must be edited before testing is `config/proxy.env`.
+## Major corrections from the previous package
 
-## Final behavior
+1. Runtime backported from Python 3.10+ syntax/library features to Python 3.6-compatible code.
+   - Removed `dataclasses`.
+   - Removed PEP 604 `X | None` types.
+   - Removed built-in generic annotations such as `dict[str, ...]`.
+   - Replaced `ThreadingHTTPServer` with `ThreadingMixIn + HTTPServer`.
+2. Authorize request now matches the supplied working v4 curl.
+3. Packaged `<...>` placeholders are rejected by `check-config`.
+4. Added `SETUP_GUIDE.md`.
+5. Added `scripts/setup.sh` so lost archive executable bits are repairable with `sh scripts/setup.sh`.
+6. Added user-crontab `@reboot` installer/remover without application files under `/etc`.
+7. Kept TLS verification enabled by default.
+8. Kept all runtime state/logs inside the dedicated project folder.
+9. Added retry-backoff protection when HTTP 401 recovery authorization itself fails, preventing repeated sniffer polls from hammering `/authorize`.
 
-1. Load `config/proxy.env` from the project directory.
-2. Authorize to StorageGRID with `POST /api/v4/authorize`.
-3. Validate every candidate token with `GET /api/v4/org/usage`.
-4. Keep the validated bearer token in RAM only.
-5. Refresh every 10 hours.
-6. Keep the working token if a scheduled refresh fails and retry after the configured retry interval.
-7. Serve `GET /storagegrid/usage` to HTTP-SNIFFER.
-8. Fetch live StorageGRID usage for every proxy usage request.
-9. On upstream HTTP 401, reauthorize safely and retry once.
-10. Never edit HTTP-SNIFFER config at runtime and never restart its Compose project.
+## Verification performed
 
-## Additional hardening in this final merge
+- Python compilation: PASS under the available Python runtime.
+- Python 3.6 grammar parse using a 3.6 grammar: PASS.
+- Manual scan for runtime features known to require Python >3.6: PASS.
+- POSIX shell syntax for all scripts: PASS.
+- Executable bit set on all `.sh` scripts in the packaged project: PASS.
+- Untouched placeholder `proxy.env` rejected by `check-config`: PASS.
+- Automated tests: **35/35 PASS**.
+- Exact authorize headers/body asserted in unit and end-to-end tests: PASS.
+- Exact v4-like authorize response shape with token in `data`: PASS.
+- Candidate token validated through `/api/v4/org/usage` before activation: PASS.
+- Automatic background interval refresh test: PASS.
+- Automatic retry after scheduled refresh failure: PASS.
+- HTTP 401 immediate reauthorization/retry: PASS.
+- Token/password not printed by upstream test: PASS.
+- Autostart installer/remover mock test (including duplicate prevention): PASS.
+- Operator-style clean-copy test after changing only the four required env values:
+  - `setup.sh`: PASS
+  - `check-config.sh`: PASS
+  - `run-tests.sh`: PASS
+  - `test-upstream.sh`: PASS
+  - `start.sh`: PASS
+  - `/readyz`: PASS
+  - `/storagegrid/usage`: PASS
+  - `status.sh`: PASS
+  - `stop.sh`: PASS
 
-- `proxy.env` is authoritative for keys it defines, avoiding accidental stale shell-environment overrides.
-- Placeholder values such as `CHANGE_ME_*` cause config validation to fail instead of starting incorrectly.
-- StorageGRID base URL validation prevents accidentally putting `/api/v4/...` into the base URL.
-- Passwords containing characters such as `=` and `#` are supported by the env-file parser.
-- Real CLI `--test-upstream` path is covered by an end-to-end test.
-- Routine HTTP access logs are DEBUG level to avoid unnecessary long-term log growth.
-- start/status/stop scripts verify the PID belongs to the proxy before treating or killing it as the managed process on Linux `/proc` systems.
+## Remaining environment-dependent verification
 
-## Validation performed
+Only real-environment checks remain:
 
-- Python compilation: PASS
-- Shell syntax: PASS
-- Unit/integration/end-to-end suite: 30/30 PASS
-- Real subprocess CLI env-file + mocked StorageGRID authorize/usage test: PASS
-- HTTP 401 reauthorization/retry path: PASS
-- Candidate-token validation-before-install path: PASS
-- Secret/token log-output checks in tests: PASS
-- Legacy `/etc` / password-file / proxy-key-file dependency scan: PASS
-- Docker Compose runtime dependency: NONE
-- Third-party Python dependency: NONE
+1. Actual StorageGRID credentials/account ID.
+2. Actual DNS/IP connectivity from the Splunk gateway to StorageGRID.
+3. Actual TLS trust on the gateway (`test-upstream.sh` will prove this).
+4. HTTP-SNIFFER container/process connectivity to `<gateway-IP>:8787`.
+5. Availability of the `crontab` command for the included no-`/etc` reboot autostart method.
 
-## Operator-style dedicated-folder test
-
-A clean copy of the final folder was tested exactly as intended for deployment:
-
-1. Edited only `config/proxy.env`.
-2. Ran `scripts/check-config.sh` -> PASS.
-3. Ran `scripts/test-upstream.sh` against a real local mock HTTP StorageGRID service -> PASS, HTTP 200.
-4. Ran `scripts/start.sh` -> PASS.
-5. Ran `scripts/status.sh` -> running with managed PID.
-6. Called `/readyz` -> HTTP 200 / ready.
-7. Called `/storagegrid/usage` -> HTTP 200 with the live mock usage JSON.
-8. Ran `scripts/stop.sh` -> clean shutdown.
-
-No project file other than `config/proxy.env` was modified for that run.
+No Codex work is required for these checks.
