@@ -384,14 +384,6 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(kwargs["json_body"]["password"], "secret-password")
             self.assertTrue(kwargs["json_body"]["cookie"])
             self.assertFalse(kwargs["json_body"]["csrfToken"])
-            self.assertEqual(
-                kwargs["headers"]["Authorization"],
-                "Bearer 00000000-0000-0000-0000-000000000000",
-            )
-            self.assertEqual(
-                kwargs["headers"]["X-Csrf-Token"],
-                "00000000000000000000000000000000",
-            )
 
     def test_fetch_usage_preserves_original_json_bytes(self):
         with tempfile.TemporaryDirectory() as td:

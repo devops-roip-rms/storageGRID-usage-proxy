@@ -44,13 +44,6 @@ class FakeStorageGridHandler(BaseHTTPRequestHandler):
         if self.path != "/api/v4/authorize":
             self._json(404, {"error": "not_found"})
             return
-
-        if self.headers.get("Authorization") != "Bearer 00000000-0000-0000-0000-000000000000":
-            self._json(401, {"error": "missing_bootstrap_authorization"})
-            return
-        if self.headers.get("X-Csrf-Token") != "00000000000000000000000000000000":
-            self._json(401, {"error": "missing_csrf_header"})
-            return
         if self.headers.get("Accept") != "application/json":
             self._json(400, {"error": "bad_accept"})
             return

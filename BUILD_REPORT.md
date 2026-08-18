@@ -9,31 +9,13 @@ This build incorporates the confirmed environment details:
 - Usage endpoint: `/api/v4/org/usage`.
 - Known-working authorize request includes:
   - `Accept: application/json`
-  - `Authorization: Bearer 00000000-0000-0000-0000-000000000000`
   - `Content-Type: application/json`
-  - `X-Csrf-Token: 00000000000000000000000000000000`
   - JSON `accountId`, `username`, `password`, `cookie: true`, `csrfToken: false`.
 - Known authorize response returns bearer token as string in `data`.
 - StorageGRID URL is HTTPS; supplied working curl does not use `-k`.
 - Deployment is in a dedicated folder on a closed-network server.
 - No application files may depend on `/etc`.
 - Proxy should start automatically after server reboot.
-
-## Major corrections from the previous package
-
-1. Runtime backported from Python 3.10+ syntax/library features to Python 3.6-compatible code.
-   - Removed `dataclasses`.
-   - Removed PEP 604 `X | None` types.
-   - Removed built-in generic annotations such as `dict[str, ...]`.
-   - Replaced `ThreadingHTTPServer` with `ThreadingMixIn + HTTPServer`.
-2. Authorize request now matches the supplied working v4 curl.
-3. Packaged `<...>` placeholders are rejected by `check-config`.
-4. Added `SETUP_GUIDE.md`.
-5. Added `scripts/setup.sh` so lost archive executable bits are repairable with `sh scripts/setup.sh`.
-6. Added user-crontab `@reboot` installer/remover without application files under `/etc`.
-7. Kept TLS verification enabled by default.
-8. Kept all runtime state/logs inside the dedicated project folder.
-9. Added retry-backoff protection when HTTP 401 recovery authorization itself fails, preventing repeated sniffer polls from hammering `/authorize`.
 
 ## Verification performed
 
@@ -72,5 +54,3 @@ Only real-environment checks remain:
 3. Actual TLS trust on the gateway (`test-upstream.sh` will prove this).
 4. HTTP-SNIFFER container/process connectivity to `<gateway-IP>:8787`.
 5. Availability of the `crontab` command for the included no-`/etc` reboot autostart method.
-
-No Codex work is required for these checks.

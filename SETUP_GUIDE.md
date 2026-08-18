@@ -61,10 +61,6 @@ The rest of the authorize configuration already matches the known-working curl:
 
 ```ini
 AUTH_PATH=/api/v4/authorize
-AUTH_BOOTSTRAP_BEARER=00000000-0000-0000-0000-000000000000
-AUTH_CSRF_HEADER_VALUE=00000000000000000000000000000000
-AUTH_COOKIE=true
-AUTH_CSRF_TOKEN=false
 USAGE_PATH=/api/v4/org/usage
 ```
 
@@ -120,8 +116,6 @@ The test performs:
 
 ```text
 POST /api/v4/authorize
-  Authorization: Bearer 00000000-0000-0000-0000-000000000000
-  X-Csrf-Token: 00000000000000000000000000000000
   Content-Type: application/json
 
   {

@@ -30,12 +30,6 @@ LOG = logging.getLogger("storagegrid-usage-proxy")
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / "config" / "proxy.env"
 
-# These non-secret bootstrap values come directly from the working StorageGRID
-# v4 authorize curl supplied for this environment. They can be overridden in
-# proxy.env, but normally should not need to be changed.
-DEFAULT_AUTH_BOOTSTRAP_BEARER = "00000000-0000-0000-0000-000000000000"
-DEFAULT_AUTH_CSRF_HEADER_VALUE = "00000000000000000000000000000000"
-
 
 class ProxyError(RuntimeError):
     """Base error for safe, user-visible operational failures."""
@@ -76,10 +70,6 @@ class Config(object):
         bind_port,
         proxy_api_key,
         log_level,
-        auth_bootstrap_bearer=DEFAULT_AUTH_BOOTSTRAP_BEARER,
-        auth_csrf_header_value=DEFAULT_AUTH_CSRF_HEADER_VALUE,
-        auth_cookie=True,
-        auth_csrf_token=False,
     ):
         self.base_url = base_url
         self.username = username
@@ -97,10 +87,6 @@ class Config(object):
         self.bind_port = bind_port
         self.proxy_api_key = proxy_api_key
         self.log_level = log_level
-        self.auth_bootstrap_bearer = auth_bootstrap_bearer
-        self.auth_csrf_header_value = auth_csrf_header_value
-        self.auth_cookie = auth_cookie
-        self.auth_csrf_token = auth_csrf_token
 
     @classmethod
     def from_env(cls):
@@ -134,17 +120,6 @@ class Config(object):
         ca_bundle_raw = os.getenv("CA_BUNDLE", "").strip()
         proxy_api_key = os.getenv("PROXY_API_KEY", "").strip() or None
 
-        auth_bootstrap_bearer = os.getenv(
-            "AUTH_BOOTSTRAP_BEARER", DEFAULT_AUTH_BOOTSTRAP_BEARER
-        ).strip()
-        auth_csrf_header_value = os.getenv(
-            "AUTH_CSRF_HEADER_VALUE", DEFAULT_AUTH_CSRF_HEADER_VALUE
-        ).strip()
-        if not auth_bootstrap_bearer:
-            raise ProxyError("AUTH_BOOTSTRAP_BEARER cannot be empty")
-        if not auth_csrf_header_value:
-            raise ProxyError("AUTH_CSRF_HEADER_VALUE cannot be empty")
-
         return cls(
             base_url=base_url,
             username=required_env("STORAGEGRID_USERNAME"),
@@ -162,10 +137,6 @@ class Config(object):
             bind_port=port,
             proxy_api_key=proxy_api_key,
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
-            auth_bootstrap_bearer=auth_bootstrap_bearer,
-            auth_csrf_header_value=auth_csrf_header_value,
-            auth_cookie=env_bool("AUTH_COOKIE", True),
-            auth_csrf_token=env_bool("AUTH_CSRF_TOKEN", False),
         )
 
 
@@ -359,22 +330,15 @@ class StorageGridClient(object):
             raise ProxyError("StorageGRID returned invalid JSON for {0}".format(purpose))
 
     def authorize(self):
-        # Match the known-working StorageGRID v4 curl exactly in semantics:
-        # bootstrap Authorization header, X-Csrf-Token header, cookie=true,
-        # csrfToken=false, plus accountId/username/password.
         response = self._request(
             self.cfg.auth_path,
             method="POST",
-            headers={
-                "Authorization": "Bearer " + self.cfg.auth_bootstrap_bearer,
-                "X-Csrf-Token": self.cfg.auth_csrf_header_value,
-            },
             json_body={
                 "accountId": self.cfg.account_id,
                 "username": self.cfg.username,
                 "password": self.cfg.password,
-                "cookie": self.cfg.auth_cookie,
-                "csrfToken": self.cfg.auth_csrf_token,
+                "cookie": True,
+                "csrfToken": False,
             },
         )
         payload = self._parse_json(response, "authorization")

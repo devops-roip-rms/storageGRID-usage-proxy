@@ -29,7 +29,8 @@ STORAGEGRID_ACCOUNT_ID=<real-account-id>
 STORAGEGRID_PASSWORD=<real-password>
 ```
 
-The v4 authorize request is already configured to match the supplied successful curl, including the zero bootstrap Authorization and X-CSRF headers, `cookie=true`, and `csrfToken=false`.
+The v4 authorize request uses the configured StorageGRID account ID,
+username, and password and sends `cookie: true` and `csrfToken: false`., `cookie=true`, and `csrfToken=false`.
 
 ## First test
 
