@@ -46,10 +46,8 @@ Python 3 and the Python standard library are sufficient.
 storagegrid-usage-proxy/
 ├── storagegrid_usage_proxy.py
 ├── config/
-│   ├── proxy.env                 <- EDIT THIS FILE ONLY
-│   └── proxy.env.example
-├── certs/
-│   └── .keep                     <- optional internal CA can be placed here
+│   └── proxy.env                 <- EDIT THIS FILE ONLY
+├── certs/                     <- optional internal CA can be placed here
 ├── scripts/
 │   ├── check-config.sh
 │   ├── test-upstream.sh
@@ -63,9 +61,7 @@ storagegrid-usage-proxy/
 │   └── test_end_to_end.py
 ├── logs/
 ├── runtime/
-├── requirements.txt
-├── BUILD_REPORT.md
-└── CODEX_PROMPT.md
+└──  BUILD_REPORT.md
 ```
 
 ## What you need to edit
