@@ -1,0 +1,22 @@
+services:
+  storagegrid-usage-proxy:
+    image: storagegrid-usage-proxy:latest
+    container_name: storagegrid-usage-proxy
+    restart: unless-stopped
+
+    ports:
+      - "8787:8787"
+
+    volumes:
+      - ./config/proxy.env:/app/config/proxy.env:ro
+      - ./certs:/app/certs:ro
+
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    stop_grace_period: 15s

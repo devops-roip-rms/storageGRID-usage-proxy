@@ -1,0 +1,115 @@
+name: Test and Build Offline Docker Image
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: storagegrid-usage-proxy
+
+jobs:
+  test-python36:
+    name: Test on Python 3.6
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run test suite on Python 3.6.15
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            python:3.6.15-slim-buster \
+            python3 -m unittest discover -s tests -v
+
+  test-python311:
+    name: Test on Python 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Run test suite on Python 3.11
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            python:3.11-slim-bookworm \
+            python3 -m unittest discover -s tests -v
+
+  package-docker-offline:
+    name: Build offline Docker image artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - test-python36
+      - test-python311
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref_type == 'tag' ||
+        github.ref_name == github.event.repository.default_branch))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Determine image version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="${GITHUB_SHA::8}"
+          fi
+          TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tar_file=$TAR_FILE" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
+
+      - name: Verify Docker
+        run: docker version
+
+      - name: Build versioned image
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          docker build --pull \
+            --build-arg APP_VERSION="$VERSION" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$IMAGE_NAME:$VERSION" \
+            -t "$IMAGE_NAME:latest" \
+            .
+
+      - name: Export offline Docker archive
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAR_FILE="${{ steps.version.outputs.tar_file }}"
+          docker save -o "$TAR_FILE" \
+            "$IMAGE_NAME:$VERSION" \
+            "$IMAGE_NAME:latest"
+          sha256sum "$TAR_FILE" > "$TAR_FILE.sha256"
+          ls -lh "$TAR_FILE" "$TAR_FILE.sha256" IMAGE_VERSION.txt
+
+      - name: Upload offline image artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: storagegrid-usage-proxy-${{ steps.version.outputs.version }}
+          path: |
+            storagegrid-usage-proxy_*.tar
+            storagegrid-usage-proxy_*.tar.sha256
+            IMAGE_VERSION.txt
+            compose.yml
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

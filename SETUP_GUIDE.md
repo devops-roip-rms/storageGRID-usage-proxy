@@ -1,213 +1,319 @@
-# StorageGRID Usage Proxy - Setup and Test Guide
+StorageGRID Usage Proxy - Setup and Test Guide
 
-This is the deployment guide for the final closed-network package.
+This guide covers both supported deployment methods:
 
-## 1. Requirements
+Option A - Native Python: retained as a fallback and troubleshooting method.
 
-- Linux server / Splunk gateway.
-- Python **3.6 or newer**. This package was specifically backported for the server's Python 3.6.8.
-- Network access from the Splunk gateway to the StorageGRID Tenant Management API over HTTPS.
-- Network access from HTTP-SNIFFER to the proxy listener on the Splunk gateway (default TCP 8787).
-- No pip packages, Git, internet access, Docker restart, `/etc` application files, or system-wide Python installation are required.
+Option B - Docker: recommended for the production Splunk gateway because Docker is already available there.
 
-## 2. Copy and enter the dedicated folder
+The proxy application logic is identical in both methods.
 
-Copy this complete folder to the desired permanent location on the Splunk gateway, then:
+1. Requirements
 
-```bash
-cd <dedicated-folder>/storagegrid-usage-proxy
-```
+Common
 
-Do not move the folder after installing reboot autostart unless you reinstall the autostart entry.
+Network access from the Splunk gateway to the StorageGRID Tenant Management API over HTTPS.
 
-## 3. Prepare script permissions
+Network access from HTTP-SNIFFER to TCP 8787 on the Splunk gateway.
 
-Run this with `sh` so it works even if ZIP/RAR transfer lost executable permissions:
+The four real StorageGRID values in config/proxy.env.
 
-```bash
-sh scripts/setup.sh
-```
+Native deployment
 
-Expected:
+Linux server / Splunk gateway.
 
-```text
-python=Python 3.6.8
-scripts_ok=yes
-setup_ok=yes
-```
+Python 3.6 or newer. The application was specifically backported for Python 3.6.8.
 
-## 4. Edit the only required configuration file
+No pip packages, Git, internet access, /etc application files, or system-wide installation are required.
 
-Edit:
+Docker deployment
 
-```text
+Docker Engine and Docker Compose plugin on the Splunk gateway.
+
+The closed-network server does not require internet access.
+
+The Docker image is built on a connected build machine or GitLab Runner and transferred as a .tar file.
+
+2. Configuration
+
+The runtime configuration file is:
+
 config/proxy.env
-```
 
-Only these four values are required to be changed:
+Keep placeholder values in the Git repository. Enter real credentials only in the deployment copy on the target/build test system and do not commit those real values back to Git. Protect the deployment copy with:
 
-```ini
+chmod 600 config/proxy.env
+
+Edit only the four required environment-specific values:
+
 STORAGEGRID_BASE_URL=https://<real-storagegrid-host-or-ip>
 STORAGEGRID_USERNAME=<real-tenant-username>
 STORAGEGRID_ACCOUNT_ID=<real-tenant-account-id>
 STORAGEGRID_PASSWORD=<real-tenant-password>
-```
 
-Use the base URL only. Do not append `/api/v4/authorize`.
+Keep the base URL limited to scheme and host/IP. Do not append /api/v4/authorize.
 
-The large account ID is kept as a string by the proxy, so it is not converted to a floating-point or integer value.
+The normal defaults are:
 
-The rest of the authorize configuration already matches the known-working curl:
-
-```ini
 AUTH_PATH=/api/v4/authorize
 USAGE_PATH=/api/v4/org/usage
-```
-
-Default token refresh:
-
-```ini
 TOKEN_REFRESH_HOURS=10
 REFRESH_RETRY_SECONDS=300
-```
+HTTP_TIMEOUT_SECONDS=30
+MAX_RESPONSE_BYTES=10485760
+TLS_VERIFY=true
+CA_BUNDLE=
+PROXY_BIND_HOST=0.0.0.0
+PROXY_PORT=8787
+PROXY_API_KEY=
+LOG_LEVEL=INFO
 
-Protect the env file:
+The authorize body includes cookie: true and csrfToken: false directly in application code. There is no bootstrap bearer or bootstrap CSRF configuration.
 
-```bash
-chmod 600 config/proxy.env
-```
+3. Validate source before deployment
 
-## 5. Validate local configuration
+From the project folder:
 
-```bash
+sh scripts/setup.sh
 ./scripts/check-config.sh
-```
+./scripts/run-tests.sh
 
 Expected:
 
-```text
 configuration_ok=yes
-```
-
-The packaged placeholder values are intentionally rejected. This command does not contact StorageGRID.
-
-## 6. Run offline tests
-
-```bash
-./scripts/run-tests.sh
-```
-
-Expected final lines:
-
-```text
 Ran 35 tests
 OK
-```
 
-These tests do not require the internet or the real StorageGRID server.
+Then test the real StorageGRID endpoint:
 
-## 7. Test the real StorageGRID API
-
-```bash
 ./scripts/test-upstream.sh
-```
-
-The test performs:
-
-```text
-POST /api/v4/authorize
-  Content-Type: application/json
-
-  {
-    "accountId": "...",
-    "username": "...",
-    "password": "...",
-    "cookie": true,
-    "csrfToken": false
-  }
-        |
-        v
-candidate bearer token from response.data
-        |
-        v
-GET /api/v4/org/usage
-Authorization: Bearer <candidate>
-```
 
 Expected:
 
-```text
 upstream_test=ok
 usage_status=200
 usage_bytes=<number>
-```
 
-Neither the tenant password nor bearer token is printed.
+The command does not print the password or bearer token.
 
-### TLS note
+TLS
 
 Keep:
 
-```ini
 TLS_VERIFY=true
 CA_BUNDLE=
-```
 
-The supplied successful curl uses HTTPS and does not use `-k`, which indicates the Splunk gateway can already validate the StorageGRID HTTPS certificate in that working path.
+If Python reports certificate verification failure, obtain the approved StorageGRID/internal CA certificate, place it under certs/, and set for example:
 
-If `test-upstream.sh` reports a certificate verification error, obtain the StorageGRID/internal CA certificate, copy it under `certs/`, and set for example:
-
-```ini
 CA_BUNDLE=certs/storagegrid-ca.pem
-```
 
-Use `TLS_VERIFY=false` only as a short diagnostic test, not as the normal configuration.
+Do not use TLS_VERIFY=false as the normal production configuration.
 
-## 8. Start and verify the proxy
+Option A - Native Python
 
-Start:
+4A. Start and verify
 
-```bash
 ./scripts/start.sh
-```
-
-Check process:
-
-```bash
 ./scripts/status.sh
-```
 
 Expected:
 
-```text
 status=running
 pid=<number>
-```
 
-Check health:
+Health checks:
 
-```bash
 curl http://127.0.0.1:8787/healthz
 curl http://127.0.0.1:8787/readyz
-```
-
-Once authorization succeeds, `/readyz` returns HTTP 200 and `status=ready`.
-
-Test live usage through the proxy:
-
-```bash
 curl http://127.0.0.1:8787/storagegrid/usage
-```
 
-The response should be the live JSON returned by StorageGRID `/api/v4/org/usage`.
+Normal operations:
 
-## 9. Configure HTTP-SNIFFER once
+./scripts/start.sh
+./scripts/status.sh
+./scripts/stop.sh
 
-Change only the StorageGRID usage entry so HTTP-SNIFFER calls this proxy instead of StorageGRID directly.
+Native log:
 
-Example:
+logs/storagegrid-usage-proxy.log
 
-```json
+5A. Native reboot autostart
+
+After the native deployment works:
+
+./scripts/install-autostart.sh
+
+This uses the current user's crontab @reboot and does not install application files under /etc.
+
+Remove it with:
+
+./scripts/remove-autostart.sh
+
+Do not install this crontab autostart when Docker is the production deployment method. Docker Compose uses restart: unless-stopped instead.
+
+Option B - Docker - Recommended
+
+4B. Docker files
+
+The project contains:
+
+Dockerfile
+compose.yml
+.dockerignore
+
+The Docker image contains the Python application only. It does not contain config/proxy.env, credentials, runtime logs, or private CA certificates.
+
+At runtime, Compose mounts:
+
+./config/proxy.env -> /app/config/proxy.env:ro
+./certs            -> /app/certs:ro
+
+5B. Build manually on a connected machine
+
+Choose a version, for example 1.0.0:
+
+docker build \
+  --build-arg APP_VERSION=1.0.0 \
+  -t storagegrid-usage-proxy:1.0.0 \
+  -t storagegrid-usage-proxy:latest \
+  .
+
+Run the source tests before export:
+
+./scripts/run-tests.sh
+
+Optional local container test:
+
+docker compose -f compose.yml up -d
+docker compose -f compose.yml ps
+curl http://127.0.0.1:8787/readyz
+docker compose -f compose.yml down
+
+This local container test requires a valid config/proxy.env and connectivity from the build/test machine to StorageGRID.
+
+6B. Export for the closed network
+
+Export both the versioned tag and latest into one archive:
+
+docker save \
+  -o storagegrid-usage-proxy_1.0.0.tar \
+  storagegrid-usage-proxy:1.0.0 \
+  storagegrid-usage-proxy:latest
+
+Create a checksum:
+
+sha256sum storagegrid-usage-proxy_1.0.0.tar \
+  > storagegrid-usage-proxy_1.0.0.tar.sha256
+
+Transfer both files through the approved closed-network transfer process.
+
+7B. Load on the Splunk gateway
+
+Verify the transferred archive if sha256sum is available:
+
+sha256sum -c storagegrid-usage-proxy_1.0.0.tar.sha256
+
+Load it:
+
+docker load -i storagegrid-usage-proxy_1.0.0.tar
+
+Confirm:
+
+docker image ls storagegrid-usage-proxy
+
+Because the archive contains the latest tag, compose.yml does not need to change for each release.
+
+8B. Start Docker deployment
+
+From the project folder on the Splunk gateway:
+
+docker compose -f compose.yml up -d
+
+Check:
+
+docker compose -f compose.yml ps
+docker inspect --format='{{.State.Health.Status}}' storagegrid-usage-proxy
+
+Logs:
+
+docker compose -f compose.yml logs -f storagegrid-usage-proxy
+
+Live endpoint tests:
+
+curl http://127.0.0.1:8787/healthz
+curl http://127.0.0.1:8787/readyz
+curl http://127.0.0.1:8787/storagegrid/usage
+
+Stop/remove the container:
+
+docker compose -f compose.yml down
+
+restart: unless-stopped handles process crashes and server reboot. No crontab entry is required for the Docker deployment.
+
+9B. Upgrade Docker deployment
+
+For a new release:
+
+change source
+   -> tests
+   -> build new image
+   -> docker save new .tar
+   -> transfer
+   -> docker load
+   -> docker compose up -d
+
+After loading a new archive that contains a new latest tag:
+
+docker compose -f compose.yml up -d
+
+If the existing container is still based on the previous image and Compose does not recreate it automatically, run:
+
+docker compose -f compose.yml up -d --force-recreate
+
+This recreates only this proxy's separate Compose project; it does not touch HTTP-SNIFFER.
+
+GitLab CI pipeline
+
+10. Pipeline behavior
+
+The included .gitlab-ci.yml runs:
+
+All pushes / merge requests
+    -> Python 3.6 test suite
+    -> Python 3.11 test suite
+
+Default branch or Git tag
+    -> Docker build
+    -> tag image with Git tag or short commit SHA
+    -> also tag image as latest
+    -> docker save to .tar
+    -> generate SHA256 checksum
+    -> publish GitLab artifacts
+
+For releases, prefer Git tags such as:
+
+v1.0.0
+v1.0.1
+v1.1.0
+
+A tagged pipeline then produces an artifact such as:
+
+storagegrid-usage-proxy_v1.0.1.tar
+storagegrid-usage-proxy_v1.0.1.tar.sha256
+IMAGE_VERSION.txt
+
+11. GitLab Runner requirement
+
+The packaging job uses Docker-in-Docker and therefore requires a GitLab Runner configured to allow privileged Docker-in-Docker.
+
+If your future GitLab environment does not permit privileged Docker-in-Docker, the application does not need to change; only the image-build job should be adapted to your approved GitLab build mechanism (for example an internal build runner or another OCI builder).
+
+HTTP-SNIFFER configuration
+
+12. Configure HTTP-SNIFFER once
+
+The StorageGRID usage entry should call the proxy instead of StorageGRID directly:
+
 {
   "name": "StorageGRID-usage",
   "src_url": "http://<splunk-gateway-IP>:8787/storagegrid/usage",
@@ -217,125 +323,50 @@ Example:
   "dst_header_name": "",
   "dst_header_value": ""
 }
-```
 
-Leave the existing `dst_url` exactly as it is in your real HTTP-SNIFFER configuration.
+Leave the existing real dst_url unchanged.
 
-After this one-time change, HTTP-SNIFFER never needs the StorageGRID bearer token. The proxy does not edit `conf.json` and does not restart HTTP-SNIFFER.
+If PROXY_API_KEY is configured, HTTP-SNIFFER must send the same value in:
 
-## 10. Verify from HTTP-SNIFFER's network context
+X-StorageGRID-Proxy-Key
 
-If HTTP-SNIFFER runs inside Docker, verify that it can reach:
+The proxy never edits HTTP-SNIFFER configuration at runtime.
 
-```text
+13. Container/network verification
+
+Because HTTP-SNIFFER is a separate container/Compose project, verify from its network context that it can reach:
+
 http://<splunk-gateway-IP>:8787/storagegrid/usage
-```
 
-`PROXY_BIND_HOST=0.0.0.0` is already the default in `proxy.env` for this reason.
+PROXY_BIND_HOST=0.0.0.0 is the packaged default for this deployment model.
 
-## 11. Enable automatic start after gateway reboot
+Token behavior
 
-The application remains entirely in its dedicated folder. The included autostart installer uses the **current user's crontab** and does not install application files under `/etc`.
+14. Automatic 10-hour logic
 
-First verify the proxy works normally. Then run:
+On process/container start:
 
-```bash
-./scripts/install-autostart.sh
-```
-
-Expected:
-
-```text
-autostart_installed=yes
-method=user_crontab_at_reboot
-project=<absolute-project-path>
-```
-
-Verify:
-
-```bash
-crontab -l
-```
-
-You should see one line containing:
-
-```text
-storagegrid-usage-proxy-autostart
-```
-
-To remove it:
-
-```bash
-./scripts/remove-autostart.sh
-```
-
-If `crontab` is not installed/available on this server, `install-autostart.sh` stops with a clear error and does not change anything. In that case, the server's approved process manager must be used for reboot startup.
-
-## 12. Normal operations
-
-Start:
-
-```bash
-./scripts/start.sh
-```
-
-Status:
-
-```bash
-./scripts/status.sh
-```
-
-Stop:
-
-```bash
-./scripts/stop.sh
-```
-
-Log:
-
-```text
-logs/storagegrid-usage-proxy.log
-```
-
-PID file:
-
-```text
-runtime/storagegrid-usage-proxy.pid
-```
-
-## 13. Automatic 10-hour logic
-
-The 10-hour schedule is internal to the continuously running Python process; cron is **not** used for token refresh.
-
-On process start:
-
-```text
-immediate authorize -> validate with usage -> install token in RAM
-```
+immediate authorize
+    -> validate candidate with /api/v4/org/usage
+    -> install token in RAM only
 
 Then:
 
-```text
 wait 10 hours
     -> authorize new candidate
-    -> validate candidate with /api/v4/org/usage
-    -> only then replace in-memory token
-```
+    -> validate candidate
+    -> only then replace active in-memory token
 
-If a scheduled refresh fails:
+If scheduled refresh fails:
 
-```text
 keep previous token
 wait 300 seconds
 retry
-```
 
 If a live usage call receives HTTP 401:
 
-```text
 reauthorize immediately
 validate replacement
 retry usage once
-```
 
-No bearer token is stored in `conf.json` or any proxy file.
+No bearer token is written to conf.json, proxy.env, a database, or another runtime file.

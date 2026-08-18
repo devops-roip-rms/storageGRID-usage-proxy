@@ -1,0 +1,67 @@
+stages:
+  - test
+  - package
+
+# Native fallback compatibility: the server currently has Python 3.6.8.
+test:python36:
+  stage: test
+  image: python:3.6.15-slim-buster
+  script:
+    - python3 -m unittest discover -s tests -v
+
+# Docker production runtime compatibility.
+test:python311:
+  stage: test
+  image: python:3.11-slim-bookworm
+  script:
+    - python3 -m unittest discover -s tests -v
+
+# Produces an offline-loadable Docker image archive.
+# GitLab Runner must support privileged Docker-in-Docker for this job.
+package:docker-offline:
+  stage: package
+  image: docker:27.5.1-cli
+  services:
+    - name: docker:27.5.1-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+    IMAGE_NAME: storagegrid-usage-proxy
+  needs:
+    - test:python36
+    - test:python311
+  before_script:
+    - docker info
+  script:
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        VERSION="$CI_COMMIT_TAG"
+      else
+        VERSION="$CI_COMMIT_SHORT_SHA"
+      fi
+      TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
+      echo "Building ${IMAGE_NAME}:${VERSION}"
+      docker build --pull \
+        --build-arg APP_VERSION="$VERSION" \
+        --label org.opencontainers.image.revision="$CI_COMMIT_SHA" \
+        --label org.opencontainers.image.source="$CI_PROJECT_URL" \
+        -t "${IMAGE_NAME}:${VERSION}" \
+        -t "${IMAGE_NAME}:latest" \
+        .
+      docker save -o "$TAR_FILE" \
+        "${IMAGE_NAME}:${VERSION}" \
+        "${IMAGE_NAME}:latest"
+      sha256sum "$TAR_FILE" > "${TAR_FILE}.sha256"
+      printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
+  artifacts:
+    name: "storagegrid-usage-proxy-${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 30 days
+    paths:
+      - storagegrid-usage-proxy_*.tar
+      - storagegrid-usage-proxy_*.tar.sha256
+      - IMAGE_VERSION.txt
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
