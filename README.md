@@ -77,3 +77,68 @@ storagegrid-usage-proxy/
 ├── BUILD_REPORT.md
 └── README.md
 ```
+```text
+HTTP-SNIFFER
+     |
+     | GET /storagegrid/usage
+     v
++-----------------------------+
+|   StorageGRID Usage Proxy   |
+|                             |
+|  1. Keeps bearer token RAM  |
+|  2. Refreshes every 10h     |
+|  3. Validates new token     |
+|  4. Retries on HTTP 401     |
++-----------------------------+
+     |
+     | GET /api/v4/org/usage
+     | Authorization: Bearer <token>
+     v
++-----------------------------+
+|     StorageGRID Tenant      |
+|                             |
+| POST /api/v4/authorize      |
+| GET  /api/v4/org/usage      |
++-----------------------------+
+     |
+     | Usage JSON
+     v
+StorageGRID Usage Proxy
+     |
+     | Same Usage JSON
+     v
+HTTP-SNIFFER
+     |
+     | Monitoring Event
+     v
+   SPLUNK
+
+Proxy starts
+    |
+    v
+POST /api/v4/authorize
+    |
+    v
+Receive Bearer Token
+    |
+    v
+Validate with /api/v4/org/usage
+    |
+    +---- FAIL ---> Keep old token
+    |               Retry after 5 min
+    |
+    v
+Store token in RAM
+    |
+    v
+Wait 10 hours
+    |
+    +--------------------+
+    |                    |
+    +---- Refresh again <-+
+
+Token lifecycle:
+Startup -> Authorize -> Validate -> Use token -> Refresh every 10h
+                                      |
+                                      +-> HTTP 401 -> Reauthorize and retry
+```
