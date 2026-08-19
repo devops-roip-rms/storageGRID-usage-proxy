@@ -77,13 +77,11 @@ The bearer token returned in `response.data` is validated with `/api/v4/org/usag
 
 ## Deployment options
 
-The same application source supports two deployment methods:
+The same application source supports two deployment methods.
 
 ### Option A - Native Python
 
-Kept as a fallback and for direct server testing. It supports Python **3.6+** and was specifically backported for the gateway's Python **3.6.8**.
-
-Native lifecycle commands:
+Retained as a fallback and troubleshooting method. The application supports Python **3.6+** and was specifically backported for the gateway's Python **3.6.8**.
 
 ```bash
 sh scripts/setup.sh
@@ -92,9 +90,9 @@ sh scripts/setup.sh
 ./scripts/stop.sh
 ```
 
-### Option B - Docker - recommended for the production server
+### Option B - Docker - recommended for production
 
-Docker owns the Python runtime and process lifecycle. The proxy remains a separate container from HTTP-SNIFFER.
+Docker owns the Python runtime and process lifecycle. The proxy remains a separate container/Compose project from HTTP-SNIFFER.
 
 ```bash
 docker load -i storagegrid-usage-proxy_<version>.tar
@@ -103,9 +101,9 @@ docker compose -f compose.yml ps
 docker compose -f compose.yml logs -f storagegrid-usage-proxy
 ```
 
-The image contains **no StorageGRID credentials**. `config/proxy.env` is mounted read-only at runtime.
+The image contains **no StorageGRID credentials**. `config/proxy.env` and optional CA certificates are mounted read-only at runtime.
 
-For the closed network, build/export the image on a connected build system, transfer the `.tar`, then use `docker load` on the Splunk gateway.
+The closed-network Splunk gateway does not need internet access. Build/export the image on a connected CI/build system, transfer the `.tar` and checksum through the approved process, then use `docker load` on the gateway.
 
 ## Configuration
 
@@ -115,9 +113,9 @@ The runtime configuration file is:
 config/proxy.env
 ```
 
-Keep the repository copy as placeholders. Enter real credentials only in the deployment copy and do not commit those values to Git.
+Keep placeholder values in Git. Enter real credentials only in the deployment copy and never commit those values.
 
-Only these four values must be environment-specific:
+Only these four values are environment-specific:
 
 ```ini
 STORAGEGRID_BASE_URL=https://<real-host-or-ip>
@@ -126,9 +124,119 @@ STORAGEGRID_ACCOUNT_ID=<real-account-id>
 STORAGEGRID_PASSWORD=<real-password>
 ```
 
-`config/proxy.env` is intentionally excluded from the Docker build context by `.dockerignore`, so credentials are not baked into image layers.
+`config/proxy.env` is excluded from the Docker build context by `.dockerignore`, so credentials are not baked into image layers.
+
+## Versioning
+
+`TAG` is the **single source of truth for the Docker release version** in both GitHub Actions and GitLab CI.
+
+Example:
+
+```text
+v1.0.0
+```
+
+Both CI systems read the file and build:
+
+```text
+storagegrid-usage-proxy:v1.0.0
+storagegrid-usage-proxy:latest
+storagegrid-usage-proxy_v1.0.0.tar
+storagegrid-usage-proxy_v1.0.0.tar.sha256
+```
+
+Use semantic release values such as:
+
+```text
+v1.0.0  first production release
+v1.0.1  bug fix
+v1.1.0  backward-compatible feature
+v2.0.0  breaking/major change
+```
+
+Do not let CI auto-increment `TAG`. Change it deliberately when a new deployable image should be produced.
+
+## CI policy
+
+Normal source commits and merge/pull requests run the compatibility tests.
+
+```text
+source change
+    |
+    +--> Python 3.6 compatibility tests
+    |
+    +--> Python 3.11 tests
+```
+
+A Docker offline artifact is produced only when a release is requested:
+
+```text
+TAG changed on default branch
+           OR
+manual pipeline/workflow run
+          |
+          v
+     tests must pass
+          |
+          v
+read version from TAG
+          |
+          v
+build versioned + latest image
+          |
+          v
+docker save
+          |
+          v
+versioned .tar + SHA256
+```
+
+This keeps ordinary commits from rebuilding a deployable image unnecessarily.
+
+## GitHub Actions - current CI
+
+The active GitHub workflow is:
+
+```text
+.github/workflows/build-offline-image.yml
+```
+
+Current behavior:
+
+- Python 3.6.15 compatibility suite runs in the official Python 3.6 Docker image.
+- The Python 3.6 image pull is retried to reduce failures from transient registry errors.
+- Python 3.11 uses `actions/setup-python`, so that test does not depend on pulling a Python 3.11 Docker image.
+- Both test suites must pass before packaging.
+- The Docker base image is explicitly pulled with retry before `docker build`.
+- The image version comes from `TAG`.
+- The offline artifact includes the versioned image, `latest`, SHA256 checksum, `IMAGE_VERSION.txt`, and `compose.yml`.
+
+Observed GitHub Actions compatibility result for the current application:
+
+```text
+Python 3.6.15: 35/35 PASS
+Python 3.11:   35/35 PASS
+```
+
+## GitLab CI - future migration
+
+`.gitlab-ci.yml` is kept in the repository so the same source can later move/copy to GitLab without changing the application.
+
+The GitLab pipeline follows the same release model:
+
+- tests on Python 3.6.15 and Python 3.11;
+- version read from `TAG`;
+- Docker packaging only when `TAG` changes on the default branch or when the pipeline is started manually;
+- versioned and `latest` tags exported to an offline `.tar`;
+- SHA256 checksum generated.
+
+The packaging job uses Docker-in-Docker, so its GitLab Runner must support privileged Docker-in-Docker.
+
+For GitLab image-pull reliability, prefer the GitLab Dependency Proxy or a runner/registry mirror when the GitLab environment is created. Job container images are pulled by the runner **before** the job script starts, so a shell retry inside the job cannot protect those initial pulls.
 
 ## Tests
+
+Local test suite:
 
 ```bash
 ./scripts/run-tests.sh
@@ -149,48 +257,21 @@ Real StorageGRID connectivity test:
 
 This performs one authorize request, validates the returned token with `/api/v4/org/usage`, and does not print the password or bearer token.
 
-## GitLab CI / offline image artifact
-
-`.gitlab-ci.yml` is included for the future GitLab repository.
-
-The pipeline:
-
-```text
-Push / Merge Request
-        |
-        +--> Test on Python 3.6
-        |
-        +--> Test on Python 3.11
-        |
-Default branch or Git tag
-        |
-        v
-Build Docker image
-        |
-        v
-Tag <version-or-commit> + latest
-        |
-        v
-docker save
-        |
-        v
-storagegrid-usage-proxy_<version>.tar
-+ SHA256 checksum
-```
-
-The Docker packaging job uses Docker-in-Docker, so the GitLab Runner used for that job must allow privileged Docker-in-Docker. Test jobs do not require Docker-in-Docker.
-
 ## Project layout
 
 ```text
 storageGRID-usage-proxy/
+├── TAG                           # Docker release version; single CI source of truth
 ├── storagegrid_usage_proxy.py
 ├── Dockerfile
 ├── compose.yml
 ├── .dockerignore
 ├── .gitlab-ci.yml
+├── .github/
+│   └── workflows/
+│       └── build-offline-image.yml
 ├── config/
-│   └── proxy.env                 # runtime configuration; keep real credentials out of Git
+│   └── proxy.env                 # runtime config; keep real credentials out of Git
 ├── certs/                        # optional internal CA PEM
 ├── scripts/
 │   ├── setup.sh
@@ -213,4 +294,4 @@ storageGRID-usage-proxy/
 └── README.md
 ```
 
-For full native and Docker deployment instructions, see **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
+For full native, Docker, offline-transfer, versioning, GitHub Actions, and GitLab deployment instructions, see **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.

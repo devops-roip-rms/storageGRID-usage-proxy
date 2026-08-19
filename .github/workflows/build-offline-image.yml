@@ -19,6 +19,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
       - name: Pull Python 3.6 image with retry
         shell: bash
         run: |
@@ -34,6 +35,7 @@ jobs:
             fi
             sleep $((attempt * 15))
           done
+
       - name: Run test suite on Python 3.6.15
         run: |
           docker run --rm \
@@ -49,14 +51,56 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+
       - name: Run test suite on Python 3.11
         run: |
           python3 --version
           python3 -m unittest discover -s tests -v
+
+  release-check:
+    name: Decide whether to package image
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should_package: ${{ steps.decision.outputs.should_package }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check release trigger
+        id: decision
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          SHOULD_PACKAGE=false
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            SHOULD_PACKAGE=true
+          elif [[ "$EVENT_NAME" == "push" &&
+                  "$GITHUB_REF_TYPE" == "branch" &&
+                  "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
+            if [[ -z "${BEFORE_SHA:-}" ||
+                  "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+              if git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep -Fxq "TAG"; then
+                SHOULD_PACKAGE=true
+              fi
+            elif git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" | grep -Fxq "TAG"; then
+              SHOULD_PACKAGE=true
+            fi
+          fi
+
+          echo "should_package=$SHOULD_PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "Package image: $SHOULD_PACKAGE"
 
   package-docker-offline:
     name: Build offline Docker image artifact
@@ -65,11 +109,8 @@ jobs:
     needs:
       - test-python36
       - test-python311
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' &&
-      (github.ref_type == 'tag' ||
-        github.ref_name == github.event.repository.default_branch))
+      - release-check
+    if: needs.release-check.outputs.should_package == 'true'
 
     steps:
       - name: Checkout repository
@@ -83,19 +124,25 @@ jobs:
             echo "ERROR: TAG file does not exist"
             exit 1
           fi
+
           VERSION="$(tr -d '[:space:]' < TAG)"
+
           if [[ -z "$VERSION" ]]; then
             echo "ERROR: TAG file is empty"
             exit 1
           fi
+
           if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
             echo "ERROR: Invalid Docker image tag: $VERSION"
             exit 1
           fi
+
           TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tar_file=$TAR_FILE" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
+
           echo "Image version: $VERSION"
 
       - name: Verify Docker
@@ -105,15 +152,19 @@ jobs:
         shell: bash
         run: |
           IMAGE="python:3.11-slim-bookworm"
+
           for attempt in 1 2 3 4 5; do
             echo "Docker pull attempt $attempt/5"
+
             if docker pull "$IMAGE"; then
               exit 0
             fi
+
             if [[ "$attempt" -eq 5 ]]; then
               echo "ERROR: Unable to pull $IMAGE after 5 attempts"
               exit 1
             fi
+
             sleep $((attempt * 15))
           done
 
@@ -121,6 +172,7 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+
           docker build \
             --build-arg APP_VERSION="$VERSION" \
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
@@ -134,9 +186,11 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAR_FILE="${{ steps.version.outputs.tar_file }}"
+
           docker save -o "$TAR_FILE" \
             "$IMAGE_NAME:$VERSION" \
             "$IMAGE_NAME:latest"
+
           sha256sum "$TAR_FILE" > "$TAR_FILE.sha256"
           ls -lh "$TAR_FILE" "$TAR_FILE.sha256" IMAGE_VERSION.txt
 

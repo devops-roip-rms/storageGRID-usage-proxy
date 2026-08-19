@@ -32,37 +32,61 @@ package:docker-offline:
   needs:
     - test:python36
     - test:python311
+
   before_script:
     - docker info
+    - |
+      IMAGE="python:3.11-slim-bookworm"
+      for attempt in 1 2 3 4 5; do
+        echo "Docker pull attempt $attempt/5"
+        if docker pull "$IMAGE"; then
+          break
+        fi
+        if [ "$attempt" -eq 5 ]; then
+          echo "ERROR: Unable to pull $IMAGE after 5 attempts"
+          exit 1
+        fi
+        sleep $((attempt * 15))
+      done
+
   script:
     - |
       if [ ! -f TAG ]; then
         echo "ERROR: TAG file does not exist"
         exit 1
       fi
+
       VERSION="$(tr -d '[:space:]' < TAG)"
+
       if [ -z "$VERSION" ]; then
         echo "ERROR: TAG file is empty"
         exit 1
       fi
+
       if ! printf '%s' "$VERSION" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
         echo "ERROR: Invalid Docker image tag: $VERSION"
         exit 1
       fi
+
       TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
+
       echo "Building ${IMAGE_NAME}:${VERSION}"
-      docker build --pull \
+
+      docker build \
         --build-arg APP_VERSION="$VERSION" \
         --label org.opencontainers.image.revision="$CI_COMMIT_SHA" \
         --label org.opencontainers.image.source="$CI_PROJECT_URL" \
         -t "${IMAGE_NAME}:${VERSION}" \
         -t "${IMAGE_NAME}:latest" \
         .
+
       docker save -o "$TAR_FILE" \
         "${IMAGE_NAME}:${VERSION}" \
         "${IMAGE_NAME}:latest"
+
       sha256sum "$TAR_FILE" > "${TAR_FILE}.sha256"
       printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
+
   artifacts:
     name: "storagegrid-usage-proxy-${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
     expire_in: 30 days
@@ -70,6 +94,10 @@ package:docker-offline:
       - storagegrid-usage-proxy_*.tar
       - storagegrid-usage-proxy_*.tar.sha256
       - IMAGE_VERSION.txt
+      - compose.yml
+
   rules:
-    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - TAG
