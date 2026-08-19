@@ -19,7 +19,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
+      - name: Pull Python 3.6 image with retry
+        shell: bash
+        run: |
+          IMAGE="python:3.6.15-slim-buster"
+          for attempt in 1 2 3 4 5; do
+            echo "Docker pull attempt $attempt/5"
+            if docker pull "$IMAGE"; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 5 ]]; then
+              echo "ERROR: Unable to pull $IMAGE after 5 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
       - name: Run test suite on Python 3.6.15
         run: |
           docker run --rm \
@@ -35,14 +49,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
       - name: Run test suite on Python 3.11
         run: |
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -w /workspace \
-            python:3.11-slim-bookworm \
-            python3 -m unittest discover -s tests -v
+          python3 --version
+          python3 -m unittest discover -s tests -v
 
   package-docker-offline:
     name: Build offline Docker image artifact
@@ -87,11 +101,27 @@ jobs:
       - name: Verify Docker
         run: docker version
 
+      - name: Pull Docker base image with retry
+        shell: bash
+        run: |
+          IMAGE="python:3.11-slim-bookworm"
+          for attempt in 1 2 3 4 5; do
+            echo "Docker pull attempt $attempt/5"
+            if docker pull "$IMAGE"; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 5 ]]; then
+              echo "ERROR: Unable to pull $IMAGE after 5 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
       - name: Build versioned image
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          docker build --pull \
+          docker build \
             --build-arg APP_VERSION="$VERSION" \
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
