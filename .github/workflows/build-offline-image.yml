@@ -54,7 +54,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' &&
-       (github.ref_type == 'tag' ||
+      (github.ref_type == 'tag' ||
         github.ref_name == github.event.repository.default_branch))
 
     steps:
@@ -65,15 +65,24 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            VERSION="$GITHUB_REF_NAME"
-          else
-            VERSION="${GITHUB_SHA::8}"
+          if [[ ! -f TAG ]]; then
+            echo "ERROR: TAG file does not exist"
+            exit 1
+          fi
+          VERSION="$(tr -d '[:space:]' < TAG)"
+          if [[ -z "$VERSION" ]]; then
+            echo "ERROR: TAG file is empty"
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "ERROR: Invalid Docker image tag: $VERSION"
+            exit 1
           fi
           TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tar_file=$TAR_FILE" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
+          echo "Image version: $VERSION"
 
       - name: Verify Docker
         run: docker version

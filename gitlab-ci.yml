@@ -36,10 +36,18 @@ package:docker-offline:
     - docker info
   script:
     - |
-      if [ -n "${CI_COMMIT_TAG:-}" ]; then
-        VERSION="$CI_COMMIT_TAG"
-      else
-        VERSION="$CI_COMMIT_SHORT_SHA"
+      if [ ! -f TAG ]; then
+        echo "ERROR: TAG file does not exist"
+        exit 1
+      fi
+      VERSION="$(tr -d '[:space:]' < TAG)"
+      if [ -z "$VERSION" ]; then
+        echo "ERROR: TAG file is empty"
+        exit 1
+      fi
+      if ! printf '%s' "$VERSION" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+        echo "ERROR: Invalid Docker image tag: $VERSION"
+        exit 1
       fi
       TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
       echo "Building ${IMAGE_NAME}:${VERSION}"
