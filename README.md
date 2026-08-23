@@ -101,7 +101,7 @@ docker compose -f compose.yml ps
 docker compose -f compose.yml logs -f storagegrid-usage-proxy
 ```
 
-The image contains **no StorageGRID credentials**. `config/proxy.env` and optional CA certificates are mounted read-only at runtime.
+The image contains **no StorageGRID credentials and no `PROXY_API_KEY`**. `config/proxy.env` and optional CA certificates are mounted read-only at runtime.
 
 The closed-network Splunk gateway does not need internet access. Build/export the image on a connected CI/build system, transfer the `.tar` and checksum through the approved process, then use `docker load` on the gateway.
 
@@ -115,16 +115,36 @@ config/proxy.env
 
 Keep placeholder values in Git. Enter real credentials only in the deployment copy and never commit those values.
 
-Only these four values are environment-specific:
+Production deployments that expose the proxy on a non-loopback listener use
+`PROXY_BIND_HOST=0.0.0.0` and keep `ALLOW_UNAUTHENTICATED_NONLOOPBACK=false`.
+`PROXY_API_KEY` is therefore required. Configure HTTP-SNIFFER to send that value in the
+`X-StorageGRID-Proxy-Key` header. The only way to start an unauthenticated non-loopback
+listener is the deliberately conspicuous `ALLOW_UNAUTHENTICATED_NONLOOPBACK=true` override;
+the proxy logs this as a dangerous configuration and it is not a normal production setting.
+
+`/readyz` returns 503 if the token is missing or refresh failures persist for
+`STALE_TOKEN_WARNING_SECONDS` (default: 900 seconds, or three retry intervals when that is
+longer). Its JSON response reports the non-sensitive failure age and count. `/metrics` exposes
+JSON health counters: token presence, seconds since the last successful refresh, consecutive
+refresh failures, and a boolean indicating a refresh error. Neither endpoint exposes a token,
+password, or error details.
+
+The Docker image health check uses `/readyz`. A persistent 503 can mark the container
+`unhealthy`, but `restart: unless-stopped` does not restart a container only because it is
+unhealthy; it restarts after process/container exit and host reboot. This avoids turning an
+upstream StorageGRID outage into an automatic restart loop.
+
+These five values are environment-specific production values:
 
 ```ini
 STORAGEGRID_BASE_URL=https://<real-host-or-ip>
 STORAGEGRID_USERNAME=<real-username>
 STORAGEGRID_ACCOUNT_ID=<real-account-id>
 STORAGEGRID_PASSWORD=<real-password>
+PROXY_API_KEY=<strong-local-shared-secret>
 ```
 
-`config/proxy.env` is excluded from the Docker build context by `.dockerignore`, so credentials are not baked into image layers.
+`config/proxy.env` is excluded from the Docker build context by `.dockerignore`, so credentials and the proxy shared key are not baked into image layers.
 
 ## Versioning
 
@@ -133,16 +153,17 @@ STORAGEGRID_PASSWORD=<real-password>
 Example:
 
 ```text
-v1.0.0
+v1.1.0
 ```
 
 Both CI systems read the file and build:
 
 ```text
-storagegrid-usage-proxy:v1.0.0
+storagegrid-usage-proxy:v1.1.0
 storagegrid-usage-proxy:latest
-storagegrid-usage-proxy_v1.0.0.tar
-storagegrid-usage-proxy_v1.0.0.tar.sha256
+storagegrid-usage-proxy_v1.1.0.tar
+storagegrid-usage-proxy_v1.1.0.tar.sha256
+IMAGE_VERSION.txt containing v1.1.0
 ```
 
 Use semantic release values such as:
@@ -211,12 +232,15 @@ Current behavior:
 - The image version comes from `TAG`.
 - The offline artifact includes the versioned image, `latest`, SHA256 checksum, `IMAGE_VERSION.txt`, and `compose.yml`.
 
-Observed GitHub Actions compatibility result for the current application:
+Expected GitHub Actions compatibility result after the local/container validation:
 
 ```text
-Python 3.6.15: 35/35 PASS
-Python 3.11:   35/35 PASS
+Python 3.6.15: 44/44 PASS
+Python 3.11:   44/44 PASS
 ```
+
+The updated 44-test suite still needs a real GitHub Actions run before it should be
+recorded as GitHub-proven.
 
 ## GitLab CI - future migration
 
@@ -245,7 +269,7 @@ Local test suite:
 Expected:
 
 ```text
-Ran 35 tests
+Ran 44 tests
 OK
 ```
 
@@ -261,37 +285,43 @@ This performs one authorize request, validates the returned token with `/api/v4/
 
 ```text
 storageGRID-usage-proxy/
-├── TAG                           # Docker release version; single CI source of truth
-├── storagegrid_usage_proxy.py
-├── Dockerfile
-├── compose.yml
-├── .dockerignore
-├── .gitlab-ci.yml
-├── .github/
-│   └── workflows/
-│       └── build-offline-image.yml
-├── config/
-│   └── proxy.env                 # runtime config; keep real credentials out of Git
-├── certs/                        # optional internal CA PEM
-├── scripts/
-│   ├── setup.sh
-│   ├── check-config.sh
-│   ├── run-tests.sh
-│   ├── test-upstream.sh
-│   ├── run.sh
-│   ├── start.sh
-│   ├── status.sh
-│   ├── stop.sh
-│   ├── install-autostart.sh
-│   └── remove-autostart.sh
-├── tests/
-│   ├── test_storagegrid_usage_proxy.py
-│   └── test_end_to_end.py
-├── logs/
-├── runtime/
-├── SETUP_GUIDE.md
-├── BUILD_REPORT.md
-└── README.md
+|-- TAG                           # Docker release version; single CI source of truth
+|-- storagegrid_usage_proxy.py
+|-- Dockerfile
+|-- compose.yml
+|-- .dockerignore
+|-- .gitlab-ci.yml
+|-- .github/
+|   `-- workflows/
+|       `-- build-offline-image.yml
+|-- config/
+|   `-- proxy.env                 # runtime config; keep real credentials out of Git
+|-- certs/
+|   `-- .keep                     # optional internal CA PEM directory
+|-- scripts/
+|   |-- setup.sh
+|   |-- check-config.sh
+|   |-- run-tests.sh
+|   |-- test-upstream.sh
+|   |-- run.sh
+|   |-- start.sh
+|   |-- status.sh
+|   |-- stop.sh
+|   |-- install-autostart.sh
+|   |-- remove-autostart.sh
+|   `-- logrotate/
+|       `-- storagegrid-usage-proxy
+|-- tests/
+|   |-- test_storagegrid_usage_proxy.py
+|   `-- test_end_to_end.py
+|-- docs/
+|   |-- SETUP_GUIDE.md
+|   `-- BUILD_REPORT.md
+|-- logs/
+|   `-- .keep
+|-- runtime/
+|   `-- .keep
+`-- README.md
 ```
 
-For full native, Docker, offline-transfer, versioning, GitHub Actions, and GitLab deployment instructions, see **[SETUP_GUIDE.md](SETUP_GUIDE.md)**.
+For full native, Docker, offline-transfer, versioning, GitHub Actions, and GitLab deployment instructions, see **[SETUP_GUIDE.md](docs/SETUP_GUIDE.md)**. The current validation summary is in **[BUILD_REPORT.md](docs/BUILD_REPORT.md)**.

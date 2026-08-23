@@ -36,6 +36,7 @@ def base_config(tmp: pathlib.Path) -> mod.Config:
         bind_host="127.0.0.1",
         bind_port=8787,
         proxy_api_key=None,
+        allow_unauthenticated_nonloopback=False,
         log_level="INFO",
     )
 
@@ -228,6 +229,24 @@ class TokenManagerTests(unittest.TestCase):
             self.assertTrue(snapshot["last_refresh_error"])
             self.assertNotIn("sensitive internal detail", json.dumps(snapshot))
 
+    def test_snapshot_reports_refresh_failure_age_and_count_without_error_detail(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            client = mock.Mock()
+            client.authorize.side_effect = ["TOKEN", mod.ProxyError("sensitive outage detail")]
+            client.fetch_usage.return_value = usage_response()
+            manager = mod.TokenManager(cfg, client)
+            manager.refresh(force=True)
+
+            with self.assertRaises(mod.ProxyError):
+                manager.refresh(force=True)
+
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot["consecutive_refresh_failures"], 1)
+            self.assertGreaterEqual(snapshot["refresh_error_age_seconds"], 0)
+            self.assertGreaterEqual(snapshot["seconds_since_last_success"], 0)
+            self.assertNotIn("sensitive outage detail", json.dumps(snapshot))
+
 
 class UsageRecoveryTests(unittest.TestCase):
     def test_live_usage_uses_current_token(self):
@@ -268,6 +287,48 @@ class UsageRecoveryTests(unittest.TestCase):
             self.assertEqual(manager.get_token(), "NEW_TOKEN")
             self.assertEqual(json.loads(response.body), {"after_reauth": True})
             self.assertEqual(client.fetch_usage.call_args_list[-1], mock.call("NEW_TOKEN"))
+
+    def test_concurrent_401_recovery_reauthorizes_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            client = mock.Mock()
+            manager = mod.TokenManager(cfg, client)
+            client.authorize.return_value = "OLD_TOKEN"
+            client.fetch_usage.return_value = usage_response()
+            manager.refresh(force=True)
+
+            client.reset_mock()
+            client.authorize.return_value = "NEW_TOKEN"
+            old_token_requests = threading.Barrier(2)
+
+            def fetch_usage(token):
+                if token == "OLD_TOKEN":
+                    old_token_requests.wait(timeout=2)
+                    raise mod.UpstreamHTTPError(401, "https://sg/api/v4/org/usage")
+                return usage_response({"recovered_with": token})
+
+            client.fetch_usage.side_effect = fetch_usage
+            results = []
+            errors = []
+
+            def request_usage():
+                try:
+                    results.append(mod.get_usage_with_recovery(client, manager))
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=request_usage) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+
+            self.assertFalse(errors)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(client.authorize.call_count, 1)
+            self.assertEqual(len(results), 2)
+            for result in results:
+                self.assertEqual(json.loads(result.body), {"recovered_with": "NEW_TOKEN"})
 
     def test_failed_401_reauthorization_enters_backoff(self):
         with tempfile.TemporaryDirectory() as td:
@@ -364,6 +425,27 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(mod.is_loopback_bind("0.0.0.0"))
         self.assertFalse(mod.is_loopback_bind("10.0.0.10"))
 
+    def test_loopback_without_proxy_key_is_allowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            mod.validate_bind_security(cfg)
+
+    def test_non_loopback_without_proxy_key_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            cfg.bind_host = "0.0.0.0"
+            with self.assertRaisesRegex(mod.ProxyError, "PROXY_API_KEY is required"):
+                mod.validate_bind_security(cfg)
+
+    def test_non_loopback_without_proxy_key_allows_explicit_override_loudly(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            cfg.bind_host = "0.0.0.0"
+            cfg.allow_unauthenticated_nonloopback = True
+            with self.assertLogs(mod.LOG, level="WARNING") as logged:
+                mod.validate_bind_security(cfg)
+            self.assertIn("DANGEROUS OVERRIDE", "\n".join(logged.output))
+
 
 class ClientTests(unittest.TestCase):
     def test_authorize_sends_expected_body_without_exposing_password_in_return(self):
@@ -433,6 +515,44 @@ class HTTPServerTests(unittest.TestCase):
                 self.assertNotIn("SECRET_TOKEN", ready)
                 self.assertEqual(json.loads(health)["status"], "ok")
                 self.assertEqual(json.loads(ready)["status"], "ready")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_readyz_reports_stale_refresh_and_metrics_do_not_leak_error_detail(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = base_config(pathlib.Path(td))
+            cfg.stale_token_warning_seconds = 60
+            client = mock.Mock()
+            client.authorize.side_effect = ["TOKEN", mod.ProxyError("sensitive outage detail")]
+            client.fetch_usage.return_value = usage_response()
+            manager = mod.TokenManager(cfg, client)
+            manager.refresh(force=True)
+            with self.assertRaises(mod.ProxyError):
+                manager.refresh(force=True)
+            with manager._state_lock:
+                manager._last_error_started_epoch = __import__("time").time() - 61
+
+            app = mod.ProxyApplication(cfg, client, manager, None)
+            server, thread = self._start_server(app)
+            try:
+                base = "http://127.0.0.1:{0}".format(server.server_port)
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(base + "/readyz", timeout=2)
+                self.assertEqual(ctx.exception.code, 503)
+                ready = json.loads(ctx.exception.read().decode("utf-8"))
+                self.assertEqual(ready["status"], "not_ready")
+                self.assertGreaterEqual(ready["refresh_error_age_seconds"], 60)
+
+                with urllib.request.urlopen(base + "/metrics", timeout=2) as response:
+                    metrics_text = response.read().decode("utf-8")
+                metrics = json.loads(metrics_text)
+                self.assertTrue(metrics["token_loaded"])
+                self.assertEqual(metrics["consecutive_refresh_failures"], 1)
+                self.assertTrue(metrics["last_refresh_error"])
+                self.assertIn("seconds_since_last_success", metrics)
+                self.assertNotIn("sensitive outage detail", metrics_text)
             finally:
                 server.shutdown()
                 server.server_close()

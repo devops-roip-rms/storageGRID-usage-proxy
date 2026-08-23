@@ -22,7 +22,7 @@ The proxy application logic is identical in all deployment paths.
 
 - Network access from the Splunk gateway to the StorageGRID Tenant Management API over HTTPS.
 - Network access from HTTP-SNIFFER to TCP `8787` on the Splunk gateway.
-- The four real StorageGRID values in `config/proxy.env`.
+- The five real production values in `config/proxy.env`, including the local proxy shared key.
 
 ### Native deployment
 
@@ -56,13 +56,14 @@ Protect the deployment copy:
 chmod 600 config/proxy.env
 ```
 
-Edit only these four required values:
+Edit these five required production values:
 
 ```ini
 STORAGEGRID_BASE_URL=https://<real-storagegrid-host-or-ip>
 STORAGEGRID_USERNAME=<real-tenant-username>
 STORAGEGRID_ACCOUNT_ID=<real-tenant-account-id>
 STORAGEGRID_PASSWORD=<real-tenant-password>
+PROXY_API_KEY=<strong-local-shared-secret>
 ```
 
 The normal defaults are:
@@ -72,15 +73,29 @@ AUTH_PATH=/api/v4/authorize
 USAGE_PATH=/api/v4/org/usage
 TOKEN_REFRESH_HOURS=10
 REFRESH_RETRY_SECONDS=300
+STALE_TOKEN_WARNING_SECONDS=900
 HTTP_TIMEOUT_SECONDS=30
 MAX_RESPONSE_BYTES=10485760
 TLS_VERIFY=true
 CA_BUNDLE=
 PROXY_BIND_HOST=0.0.0.0
 PROXY_PORT=8787
-PROXY_API_KEY=
+ALLOW_UNAUTHENTICATED_NONLOOPBACK=false
 LOG_LEVEL=INFO
 ```
+
+`PROXY_API_KEY` is required when `PROXY_BIND_HOST` is non-loopback, including `0.0.0.0`.
+Set the same value in HTTP-SNIFFER's `X-StorageGRID-Proxy-Key` header. A non-loopback
+listener without a key fails during `--check-config` and at startup unless the operator
+deliberately sets `ALLOW_UNAUTHENTICATED_NONLOOPBACK=true`; that override is logged as
+dangerous and should only be used for an explicitly accepted insecure deployment.
+
+`/readyz` returns 503 when no token is loaded or refresh failures have persisted for
+`STALE_TOKEN_WARNING_SECONDS`. The default is 900 seconds (or three retry intervals if longer).
+The endpoint's JSON status includes only non-sensitive refresh failure age/count fields. The
+unauthenticated `GET /metrics` JSON endpoint exposes token presence, seconds since last success,
+consecutive failure count, and a boolean error state; it never includes token, password, or error
+text.
 
 The authorize body contains `cookie: true` and `csrfToken: false` directly in application code. There is no bootstrap bearer or bootstrap CSRF configuration.
 
@@ -93,7 +108,7 @@ The authorize body contains `cookie: true` and `csrfToken: false` directly in ap
 The file must contain one valid Docker tag, for example:
 
 ```text
-v1.0.0
+v1.1.0
 ```
 
 Recommended convention:
@@ -142,7 +157,7 @@ Expected:
 
 ```text
 configuration_ok=yes
-Ran 35 tests
+Ran 44 tests
 OK
 ```
 
@@ -219,6 +234,38 @@ Native log:
 logs/storagegrid-usage-proxy.log
 ```
 
+### Native log rotation
+
+`scripts/start.sh` appends to the native log and intentionally leaves application logging
+unchanged. Install the included `copytruncate` logrotate template so the running proxy can keep
+its file descriptor open while old logs are rotated.
+
+For a system-wide installation (replace the project path only through this command):
+
+```bash
+sudo sed "s|__PROJECT_DIR__|$(pwd)|g" scripts/logrotate/storagegrid-usage-proxy \
+  | sudo tee /etc/logrotate.d/storagegrid-usage-proxy >/dev/null
+sudo logrotate -d /etc/logrotate.d/storagegrid-usage-proxy
+```
+
+Run those commands from the project directory. The installed policy rotates the log daily, keeps
+14 archives, and compresses old archives after one rotation.
+
+Without root access, install a per-user policy and invoke logrotate from the current user's cron:
+
+```bash
+mkdir -p "$HOME/.config/logrotate" "$HOME/.local/state"
+sed "s|__PROJECT_DIR__|$(pwd)|g" scripts/logrotate/storagegrid-usage-proxy \
+  > "$HOME/.config/logrotate/storagegrid-usage-proxy"
+crontab -e
+```
+
+Add this daily crontab entry, adjusting the `logrotate` path if needed:
+
+```cron
+0 0 * * * /usr/sbin/logrotate -s "$HOME/.local/state/storagegrid-usage-proxy.logrotate.status" "$HOME/.config/logrotate/storagegrid-usage-proxy"
+```
+
 ## 6A. Native reboot autostart
 
 After native deployment works:
@@ -251,7 +298,7 @@ compose.yml
 .dockerignore
 ```
 
-The Docker image contains application code and its Python runtime. It does **not** contain `config/proxy.env`, real credentials, runtime logs, or private CA certificates.
+The Docker image contains application code and its Python runtime. It does **not** contain `config/proxy.env`, real credentials, `PROXY_API_KEY`, runtime logs, or private CA certificates.
 
 Compose mounts:
 
@@ -379,7 +426,10 @@ Stop/remove:
 docker compose -f compose.yml down
 ```
 
-`restart: unless-stopped` handles application crashes and host reboot. No native crontab autostart is required.
+`restart: unless-stopped` handles process/container exits and host reboot. The Dockerfile
+health check uses `/readyz`, so a sustained 503 can mark the container `unhealthy`, but Docker
+does not restart a container merely because its health status is unhealthy. No native crontab
+autostart or outage-driven restart watchdog is required.
 
 ## 10B. Upgrade Docker deployment
 
@@ -443,12 +493,15 @@ Python 3.6.15 compatibility suite
 Python 3.11 suite
 ```
 
-Current application result observed in GitHub Actions:
+Expected result after local/container validation:
 
 ```text
-Python 3.6.15: 35/35 PASS
-Python 3.11:   35/35 PASS
+Python 3.6.15: 44/44 PASS
+Python 3.11:   44/44 PASS
 ```
+
+The updated 44-test suite still needs a real GitHub Actions run before it should be
+recorded as GitHub-proven.
 
 Python 3.6 runs in `python:3.6.15-slim-buster`. The workflow explicitly retries the Docker pull.
 
@@ -563,20 +616,14 @@ The StorageGRID usage entry should call the proxy instead of StorageGRID directl
   "name": "StorageGRID-usage",
   "src_url": "http://<splunk-gateway-IP>:8787/storagegrid/usage",
   "dst_url": "http://<existing-splunk-gateway-destination>",
-  "src_header_name": "",
-  "src_header_value": "",
+  "src_header_name": "X-StorageGRID-Proxy-Key",
+  "src_header_value": "<SAME VALUE AS PROXY_API_KEY>",
   "dst_header_name": "",
   "dst_header_value": ""
 }
 ```
 
 Leave the real existing `dst_url` unchanged.
-
-If `PROXY_API_KEY` is configured, HTTP-SNIFFER must send:
-
-```text
-X-StorageGRID-Proxy-Key
-```
 
 The proxy never edits HTTP-SNIFFER configuration at runtime.
 
@@ -628,5 +675,8 @@ reauthorize immediately
 validate replacement
 retry usage once
 ```
+
+Concurrent HTTP 401 responses for the same active token trigger only one reauthorization;
+the remaining requests reuse the validated replacement token.
 
 No bearer token is written to `conf.json`, `proxy.env`, a database, or another runtime file.

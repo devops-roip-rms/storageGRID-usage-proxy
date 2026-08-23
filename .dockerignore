@@ -5,10 +5,24 @@
 
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
 *.log
 *.pid
 *.tar
 *.tar.gz
+*.sha256
+IMAGE_VERSION.txt
 *.zip
 *.rar
 
@@ -24,7 +38,6 @@ runtime/*
 
 tests/
 scripts/
+docs/
 README.md
-SETUP_GUIDE.md
-BUILD_REPORT.md
 compose.yml

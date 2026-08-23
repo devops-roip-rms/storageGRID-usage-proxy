@@ -2,27 +2,35 @@ stages:
   - test
   - package
 
+# Route Docker Hub images through GitLab's Dependency Proxy. The proxy must be
+# enabled for the GitLab group; a self-hosted installation may instead point
+# these image references at its approved registry mirror.
+variables:
+  DOCKER_PROXY_PREFIX: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}
+
 # Native fallback compatibility: the server currently has Python 3.6.8.
 test:python36:
   stage: test
-  image: python:3.6.15-slim-buster
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:3.6.15-slim-buster
   script:
     - python3 -m unittest discover -s tests -v
 
 # Docker production runtime compatibility.
 test:python311:
   stage: test
-  image: python:3.11-slim-bookworm
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:3.11-slim-bookworm
   script:
     - python3 -m unittest discover -s tests -v
 
 # Produces an offline-loadable Docker image archive.
-# GitLab Runner must support privileged Docker-in-Docker for this job.
+# The GitLab Runner Docker executor must be configured with privileged = true
+# for Docker-in-Docker; that setting cannot be enabled by this project file.
 package:docker-offline:
   stage: package
-  image: docker:27.5.1-cli
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/docker:27.5.1-cli
   services:
-    - name: docker:27.5.1-dind
+    - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/docker:27.5.1-dind
+      alias: docker
       command: ["--tls=false"]
   variables:
     DOCKER_HOST: tcp://docker:2375
@@ -36,14 +44,14 @@ package:docker-offline:
   before_script:
     - docker info
     - |
-      IMAGE="python:3.11-slim-bookworm"
+      BASE_IMAGE="${DOCKER_PROXY_PREFIX}/python:3.11-slim-bookworm"
       for attempt in 1 2 3 4 5; do
         echo "Docker pull attempt $attempt/5"
-        if docker pull "$IMAGE"; then
+        if docker pull "$BASE_IMAGE"; then
           break
         fi
         if [ "$attempt" -eq 5 ]; then
-          echo "ERROR: Unable to pull $IMAGE after 5 attempts"
+          echo "ERROR: Unable to pull $BASE_IMAGE after 5 attempts"
           exit 1
         fi
         sleep $((attempt * 15))
@@ -69,10 +77,12 @@ package:docker-offline:
       fi
 
       TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
+      BASE_IMAGE="${DOCKER_PROXY_PREFIX}/python:3.11-slim-bookworm"
 
       echo "Building ${IMAGE_NAME}:${VERSION}"
 
       docker build \
+        --build-arg BASE_IMAGE="$BASE_IMAGE" \
         --build-arg APP_VERSION="$VERSION" \
         --label org.opencontainers.image.revision="$CI_COMMIT_SHA" \
         --label org.opencontainers.image.source="$CI_PROJECT_URL" \
