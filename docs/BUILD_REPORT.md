@@ -89,17 +89,17 @@ Retained as fallback/troubleshooting.
 Example:
 
 ```text
-v1.1.0
+v1.1.1
 ```
 
 Both CI systems use it to produce:
 
 ```text
-storagegrid-usage-proxy:v1.1.0
+storagegrid-usage-proxy:v1.1.1
 storagegrid-usage-proxy:latest
-storagegrid-usage-proxy_v1.1.0.tar
-storagegrid-usage-proxy_v1.1.0.tar.sha256
-IMAGE_VERSION.txt containing v1.1.0
+storagegrid-usage-proxy_v1.1.1.tar
+storagegrid-usage-proxy_v1.1.1.tar.sha256
+IMAGE_VERSION.txt containing v1.1.1
 ```
 
 Normal code commits do not require a `TAG` change.

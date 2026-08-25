@@ -43,17 +43,33 @@ package:docker-offline:
 
   before_script:
     - docker info
+
+    - |
+      if [ -z "${CI_DEPENDENCY_PROXY_SERVER:-}" ] || [ -z "${CI_DEPENDENCY_PROXY_USER:-}" ] || [ -z "${CI_DEPENDENCY_PROXY_PASSWORD:-}" ]; then
+        echo "ERROR: GitLab Dependency Proxy credentials are unavailable"
+        exit 1
+      fi
+
+      echo "$CI_DEPENDENCY_PROXY_PASSWORD" |
+        docker login "$CI_DEPENDENCY_PROXY_SERVER" \
+          --username "$CI_DEPENDENCY_PROXY_USER" \
+          --password-stdin
+
     - |
       BASE_IMAGE="${DOCKER_PROXY_PREFIX}/python:3.11-slim-bookworm"
+
       for attempt in 1 2 3 4 5; do
         echo "Docker pull attempt $attempt/5"
+
         if docker pull "$BASE_IMAGE"; then
           break
         fi
+
         if [ "$attempt" -eq 5 ]; then
           echo "ERROR: Unable to pull $BASE_IMAGE after 5 attempts"
           exit 1
         fi
+
         sleep $((attempt * 15))
       done
 
@@ -107,7 +123,8 @@ package:docker-offline:
       - compose.yml
 
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       changes:
         - TAG

@@ -108,7 +108,7 @@ The authorize body contains `cookie: true` and `csrfToken: false` directly in ap
 The file must contain one valid Docker tag, for example:
 
 ```text
-v1.1.0
+v1.1.1
 ```
 
 Recommended convention:
@@ -116,7 +116,7 @@ Recommended convention:
 ```text
 v1.0.0  first production release
 v1.0.1  bug fix
-v1.1.0  backward-compatible feature
+v1.1.1  backward-compatible feature
 v2.0.0  major/breaking release
 ```
 

@@ -153,17 +153,17 @@ PROXY_API_KEY=<strong-local-shared-secret>
 Example:
 
 ```text
-v1.1.0
+v1.1.1
 ```
 
 Both CI systems read the file and build:
 
 ```text
-storagegrid-usage-proxy:v1.1.0
+storagegrid-usage-proxy:v1.1.1
 storagegrid-usage-proxy:latest
-storagegrid-usage-proxy_v1.1.0.tar
-storagegrid-usage-proxy_v1.1.0.tar.sha256
-IMAGE_VERSION.txt containing v1.1.0
+storagegrid-usage-proxy_v1.1.1.tar
+storagegrid-usage-proxy_v1.1.1.tar.sha256
+IMAGE_VERSION.txt containing v1.1.1
 ```
 
 Use semantic release values such as:
@@ -171,7 +171,7 @@ Use semantic release values such as:
 ```text
 v1.0.0  first production release
 v1.0.1  bug fix
-v1.1.0  backward-compatible feature
+v1.1.1  backward-compatible feature
 v2.0.0  breaking/major change
 ```
 

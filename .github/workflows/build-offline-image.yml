@@ -84,7 +84,9 @@ jobs:
         run: |
           SHOULD_PACKAGE=false
 
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" &&
+                "$GITHUB_REF_TYPE" == "branch" &&
+                "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
             SHOULD_PACKAGE=true
           elif [[ "$EVENT_NAME" == "push" &&
                   "$GITHUB_REF_TYPE" == "branch" &&
