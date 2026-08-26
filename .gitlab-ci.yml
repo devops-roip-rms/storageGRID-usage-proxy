@@ -8,9 +8,18 @@ stages:
 variables:
   DOCKER_PROXY_PREFIX: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}
 
+default:
+  interruptible: true
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
 # Native fallback compatibility: the server currently has Python 3.6.8.
 test:python36:
   stage: test
+  timeout: 10m
   image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:3.6.15-slim-buster
   script:
     - python3 -m unittest discover -s tests -v
@@ -18,6 +27,7 @@ test:python36:
 # Docker production runtime compatibility.
 test:python311:
   stage: test
+  timeout: 10m
   image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/python:3.11-slim-bookworm
   script:
     - python3 -m unittest discover -s tests -v
@@ -27,6 +37,7 @@ test:python311:
 # for Docker-in-Docker; that setting cannot be enabled by this project file.
 package:docker-offline:
   stage: package
+  timeout: 20m
   image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/docker:27.5.1-cli
   services:
     - name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/docker:27.5.1-dind
@@ -36,13 +47,30 @@ package:docker-offline:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
     DOCKER_DRIVER: overlay2
+    DOCKER_CLIENT_TIMEOUT: "10"
+    HEALTHCHECK_TCP_PORT: "2375"
     IMAGE_NAME: storagegrid-usage-proxy
   needs:
     - test:python36
     - test:python311
 
   before_script:
-    - docker info
+    - |
+      for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        echo "Waiting for Docker daemon attempt $attempt/12"
+
+        if timeout 10 docker info; then
+          break
+        fi
+
+        if [ "$attempt" -eq 12 ]; then
+          echo "ERROR: Docker daemon did not become ready."
+          echo "Confirm the GitLab Runner Docker executor is configured with privileged = true for docker:dind."
+          exit 1
+        fi
+
+        sleep 5
+      done
 
     - |
       if [ -z "${CI_DEPENDENCY_PROXY_SERVER:-}" ] || [ -z "${CI_DEPENDENCY_PROXY_USER:-}" ] || [ -z "${CI_DEPENDENCY_PROXY_PASSWORD:-}" ]; then
