@@ -16,25 +16,14 @@ jobs:
     name: Test on Python 3.6
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Pull Python 3.6 image with retry
         shell: bash
-        run: |
-          IMAGE="python:3.6.15-slim-buster"
-          for attempt in 1 2 3 4 5; do
-            echo "Docker pull attempt $attempt/5"
-            if docker pull "$IMAGE"; then
-              exit 0
-            fi
-            if [[ "$attempt" -eq 5 ]]; then
-              echo "ERROR: Unable to pull $IMAGE after 5 attempts"
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
+        run: bash .github/scripts/pull-image-with-retry.sh "python:3.6.15-slim-buster"
 
       - name: Run test suite on Python 3.6.15
         run: |
@@ -48,6 +37,7 @@ jobs:
     name: Test on Python 3.11
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -66,8 +56,10 @@ jobs:
     name: Decide whether to package image
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     outputs:
       should_package: ${{ steps.decision.outputs.should_package }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -81,35 +73,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          SHOULD_PACKAGE=false
-
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            SHOULD_PACKAGE=true
-          elif [[ "$EVENT_NAME" == "push" &&
-                  "$GITHUB_REF_TYPE" == "branch" &&
-                  "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
-            if [[ -z "${BEFORE_SHA:-}" ||
-                  "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]]; then
-              if git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep -Fxq "TAG"; then
-                SHOULD_PACKAGE=true
-              fi
-            elif git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" | grep -Fxq "TAG"; then
-              SHOULD_PACKAGE=true
-            fi
-          fi
-
-          echo "should_package=$SHOULD_PACKAGE" >> "$GITHUB_OUTPUT"
-          echo "Package image: $SHOULD_PACKAGE"
+        run: bash .github/scripts/release-check.sh
 
   package-docker-offline:
     name: Build offline Docker image artifact
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     needs:
       - test-python36
       - test-python311
       - release-check
+
     if: needs.release-check.outputs.should_package == 'true'
 
     steps:
@@ -119,78 +94,27 @@ jobs:
       - name: Determine image version
         id: version
         shell: bash
-        run: |
-          if [[ ! -f TAG ]]; then
-            echo "ERROR: TAG file does not exist"
-            exit 1
-          fi
-
-          VERSION="$(tr -d '[:space:]' < TAG)"
-
-          if [[ -z "$VERSION" ]]; then
-            echo "ERROR: TAG file is empty"
-            exit 1
-          fi
-
-          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "ERROR: Invalid Docker image tag: $VERSION"
-            exit 1
-          fi
-
-          TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tar_file=$TAR_FILE" >> "$GITHUB_OUTPUT"
-          printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
-
-          echo "Image version: $VERSION"
+        run: bash .github/scripts/determine-version.sh
 
       - name: Verify Docker
         run: docker version
 
       - name: Pull Docker base image with retry
         shell: bash
-        run: |
-          IMAGE="python:3.11-slim-bookworm"
-
-          for attempt in 1 2 3 4 5; do
-            echo "Docker pull attempt $attempt/5"
-
-            if docker pull "$IMAGE"; then
-              exit 0
-            fi
-
-            if [[ "$attempt" -eq 5 ]]; then
-              echo "ERROR: Unable to pull $IMAGE after 5 attempts"
-              exit 1
-            fi
-
-            sleep $((attempt * 15))
-          done
+        run: bash .github/scripts/pull-image-with-retry.sh "python:3.11-slim-bookworm"
 
       - name: Build versioned image
         shell: bash
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
-          docker build \
-            --build-arg APP_VERSION="$VERSION" \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" \
-            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            -t "$IMAGE_NAME:$VERSION" \
-            .
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash .github/scripts/build-image.sh
 
       - name: Export offline Docker archive
         shell: bash
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAR_FILE="${{ steps.version.outputs.tar_file }}"
-
-          docker save -o "$TAR_FILE" "$IMAGE_NAME:$VERSION"
-
-          sha256sum "$TAR_FILE" > "$TAR_FILE.sha256"
-          printf 'IMAGE_TAG=%s\\n' "$VERSION" > .env
-          ls -lh "$TAR_FILE" "$TAR_FILE.sha256" IMAGE_VERSION.txt .env
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAR_FILE: ${{ steps.version.outputs.tar_file }}
+        run: bash .github/scripts/export-offline-image.sh
 
       - name: Upload offline image artifact
         uses: actions/upload-artifact@v7
