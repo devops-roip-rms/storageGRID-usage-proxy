@@ -1,104 +1,38 @@
-# GitLab CI for closed-network deployment using an internal container registry.
-#
-# The runner must be able to pull all required images from the internal
-# registry before the job starts.
-#
-# Required images in the internal registry:
-#   python:3.6.15-slim-buster
-#   python:3.11-slim-bookworm
-#   docker:27.5.1-cli
-#   docker:27.5.1-dind
-#
-# Replace <registry.company.local> with the actual internal registry address.
+default:
+  tags:
+    - docker
 
 stages:
   - test
   - package
 
 variables:
-  IMAGE_PREFIX: "<registry.company.local>"
   IMAGE_NAME: storagegrid-usage-proxy
 
 test:python36:
   stage: test
-  image: "${IMAGE_PREFIX}/python:3.6.15-slim-buster"
+  image: "cr.io:5000/python:3.6.15-slim-buster"
   script:
-    - python3 -m unittest discover -s tests -v
+    - python -m unittest discover -s tests -v
 
 test:python311:
   stage: test
-  image: "${IMAGE_PREFIX}/python:3.11-slim-bookworm"
+  image: "cr.io:5000/python:3.11-slim-bookworm"
   script:
-    - python3 -m unittest discover -s tests -v
+    - python -m unittest discover -s tests -v
 
 package:docker-offline:
   stage: package
-  image: "${IMAGE_PREFIX}/docker:27.5.1-cli"
-  services:
-    - name: "${IMAGE_PREFIX}/docker:27.5.1-dind"
-      alias: docker
-      command: ["--tls=false"]
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-    DOCKER_DRIVER: overlay2
+  image: "cr.io:5000/docker:27.5.1-cli"
   needs:
     - test:python36
     - test:python311
   before_script:
     - docker info
-    - |
-      BASE_IMAGE="${IMAGE_PREFIX}/python:3.11-slim-bookworm"
-      for attempt in 1 2 3 4 5; do
-        echo "Docker pull attempt $attempt/5"
-        if docker pull "$BASE_IMAGE"; then
-          break
-        fi
-        if [ "$attempt" -eq 5 ]; then
-          echo "ERROR: Unable to pull $BASE_IMAGE after 5 attempts"
-          exit 1
-        fi
-        sleep $((attempt * 15))
-      done
+    - sh .gitlab-ci-cd/pull-base-image.sh
+
   script:
-    - |
-      set -eu
-
-      if [ ! -f TAG ]; then
-        echo "ERROR: TAG file does not exist"
-        exit 1
-      fi
-
-      VERSION="$(tr -d '[:space:]' < TAG)"
-
-      if [ -z "$VERSION" ]; then
-        echo "ERROR: TAG file is empty"
-        exit 1
-      fi
-
-      if ! printf '%s' "$VERSION" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
-        echo "ERROR: Invalid Docker image tag: $VERSION"
-        exit 1
-      fi
-
-      TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
-      BASE_IMAGE="${IMAGE_PREFIX}/python:3.11-slim-bookworm"
-
-      docker build \
-        --build-arg BASE_IMAGE="$BASE_IMAGE" \
-        --build-arg APP_VERSION="$VERSION" \
-        --label org.opencontainers.image.revision="$CI_COMMIT_SHA" \
-        --label org.opencontainers.image.source="$CI_PROJECT_URL" \
-        -t "${IMAGE_NAME}:${VERSION}" \
-        .
-
-      docker save -o "$TAR_FILE" "${IMAGE_NAME}:${VERSION}"
-      sha256sum "$TAR_FILE" > "${TAR_FILE}.sha256"
-
-      # Compose reads this file automatically. It prevents deployment from
-      # depending on the mutable 'latest' tag.
-      printf 'IMAGE_TAG=%s\n' "$VERSION" > .env
-      printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
+    - sh .gitlab-ci-cd/package-docker-offline.sh
 
   artifacts:
     name: "storagegrid-usage-proxy-${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
@@ -109,7 +43,6 @@ package:docker-offline:
       - IMAGE_VERSION.txt
       - .env
       - compose.yml
-      - config/proxy.env
 
   rules:
     - if: '$CI_PIPELINE_SOURCE == "web"'
