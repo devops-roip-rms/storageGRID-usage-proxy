@@ -202,7 +202,6 @@ jobs:
             IMAGE_VERSION.txt
             .env
             compose.yml
-            config/proxy.env
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
