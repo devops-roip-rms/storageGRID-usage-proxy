@@ -84,9 +84,7 @@ jobs:
         run: |
           SHOULD_PACKAGE=false
 
-          if [[ "$EVENT_NAME" == "workflow_dispatch" &&
-                "$GITHUB_REF_TYPE" == "branch" &&
-                "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             SHOULD_PACKAGE=true
           elif [[ "$EVENT_NAME" == "push" &&
                   "$GITHUB_REF_TYPE" == "branch" &&
@@ -150,9 +148,6 @@ jobs:
       - name: Verify Docker
         run: docker version
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Pull Docker base image with retry
         shell: bash
         run: |
@@ -174,21 +169,16 @@ jobs:
           done
 
       - name: Build versioned image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          push: false
-          build-args: |
-            APP_VERSION=${{ steps.version.outputs.version }}
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE_NAME }}:latest
-          labels: |
-            org.opencontainers.image.title=StorageGRID Usage Proxy
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          docker build \
+            --build-arg APP_VERSION="$VERSION" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$IMAGE_NAME:$VERSION" \
+            .
 
       - name: Export offline Docker archive
         shell: bash
@@ -196,12 +186,11 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAR_FILE="${{ steps.version.outputs.tar_file }}"
 
-          docker save -o "$TAR_FILE" \
-            "$IMAGE_NAME:$VERSION" \
-            "$IMAGE_NAME:latest"
+          docker save -o "$TAR_FILE" "$IMAGE_NAME:$VERSION"
 
           sha256sum "$TAR_FILE" > "$TAR_FILE.sha256"
-          ls -lh "$TAR_FILE" "$TAR_FILE.sha256" IMAGE_VERSION.txt
+          printf 'IMAGE_TAG=%s\\n' "$VERSION" > .env
+          ls -lh "$TAR_FILE" "$TAR_FILE.sha256" IMAGE_VERSION.txt .env
 
       - name: Upload offline image artifact
         uses: actions/upload-artifact@v7
@@ -211,7 +200,9 @@ jobs:
             storagegrid-usage-proxy_*.tar
             storagegrid-usage-proxy_*.tar.sha256
             IMAGE_VERSION.txt
+            .env
             compose.yml
+            config/proxy.env
           if-no-files-found: error
           retention-days: 30
           compression-level: 0

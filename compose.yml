@@ -1,6 +1,6 @@
 services:
   storagegrid-usage-proxy:
-    image: storagegrid-usage-proxy:latest
+    image: storagegrid-usage-proxy:${IMAGE_TAG:?IMAGE_TAG must be set}
     container_name: storagegrid-usage-proxy
     restart: unless-stopped
 

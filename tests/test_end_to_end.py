@@ -95,70 +95,38 @@ class EndToEndTests(unittest.TestCase):
         FakeStorageGridHandler.usage_count = 0
         FakeStorageGridHandler.valid_token = None
 
-    def _write_check_config_env(self, env_file, proxy_api_key, allow_unauthenticated):
-        env_file.write_text(
-            "\n".join(
-                [
-                    "STORAGEGRID_BASE_URL=https://storagegrid.example.invalid",
-                    "STORAGEGRID_USERNAME=monitoring-user",
-                    "STORAGEGRID_ACCOUNT_ID=tenant-123",
-                    "STORAGEGRID_PASSWORD=secret-password",
-                    "AUTH_PATH=/api/v4/authorize",
-                    "USAGE_PATH=/api/v4/org/usage",
-                    "TLS_VERIFY=true",
-                    "PROXY_BIND_HOST=0.0.0.0",
-                    "PROXY_PORT=8787",
-                    "PROXY_API_KEY={0}".format(proxy_api_key),
-                    "ALLOW_UNAUTHENTICATED_NONLOOPBACK={0}".format(
-                        allow_unauthenticated
-                    ),
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
     def _run_check_config(self, env_file):
         return subprocess.run(
             [sys.executable, str(MODULE_PATH), "--env-file", str(env_file), "--check-config"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
-            timeout=5,
+            timeout=15,
             check=False,
         )
 
-    def test_check_config_accepts_secure_non_loopback_with_proxy_key(self):
+    def test_check_config_accepts_non_loopback_without_proxy_key(self):
         with tempfile.TemporaryDirectory() as td:
             env_file = pathlib.Path(td) / "proxy.env"
-            self._write_check_config_env(env_file, "strong-local-shared-secret", "false")
-
+            env_file.write_text(
+                "\n".join(
+                    [
+                        "STORAGEGRID_BASE_URL=https://storagegrid.example.invalid",
+                        "STORAGEGRID_USERNAME=monitoring-user",
+                        "STORAGEGRID_ACCOUNT_ID=tenant-123",
+                        "STORAGEGRID_PASSWORD=secret-password",
+                        "AUTH_PATH=/api/v4/authorize",
+                        "USAGE_PATH=/api/v4/org/usage",
+                        "TLS_VERIFY=true",
+                        "PROXY_BIND_HOST=0.0.0.0",
+                        "PROXY_PORT=8787",
+                    ]
+                ) + "\n",
+                encoding="utf-8",
+            )
             result = self._run_check_config(env_file)
-
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("configuration_ok=yes", result.stdout)
-
-    def test_check_config_rejects_unauthenticated_non_loopback_default(self):
-        with tempfile.TemporaryDirectory() as td:
-            env_file = pathlib.Path(td) / "proxy.env"
-            self._write_check_config_env(env_file, "", "false")
-
-            result = self._run_check_config(env_file)
-
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertNotIn("configuration_ok=yes", result.stdout)
-            self.assertIn("PROXY_API_KEY is required", result.stderr)
-
-    def test_check_config_allows_explicit_unsafe_non_loopback_override(self):
-        with tempfile.TemporaryDirectory() as td:
-            env_file = pathlib.Path(td) / "proxy.env"
-            self._write_check_config_env(env_file, "", "true")
-
-            result = self._run_check_config(env_file)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("configuration_ok=yes", result.stdout)
-            self.assertIn("DANGEROUS OVERRIDE", result.stdout + result.stderr)
 
     def test_cli_env_file_upstream_test(self):
         upstream = TestThreadingHTTPServer(("127.0.0.1", 0), FakeStorageGridHandler)
@@ -190,7 +158,7 @@ class EndToEndTests(unittest.TestCase):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     universal_newlines=True,
-                    timeout=5,
+                    timeout=15,
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -229,9 +197,7 @@ class EndToEndTests(unittest.TestCase):
                     refresh_retry_seconds=300.0,
                     bind_host="127.0.0.1",
                     bind_port=0,
-                    proxy_api_key=None,
-                    allow_unauthenticated_nonloopback=False,
-                    log_level="INFO",
+                                    log_level="INFO",
                 )
                 client = mod.StorageGridClient(cfg, ssl.create_default_context())
                 manager = mod.TokenManager(cfg, client)
@@ -239,7 +205,7 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(manager.get_token(), "TOKEN_1")
                 self.assertEqual(FakeStorageGridHandler.auth_count, 1)
 
-                app = mod.ProxyApplication(cfg, client, manager, None)
+                app = mod.ProxyApplication(cfg, client, manager)
                 proxy = mod.ProxyHTTPServer(("127.0.0.1", 0), app)
                 proxy_thread = threading.Thread(target=proxy.serve_forever)
                 proxy_thread.daemon = True

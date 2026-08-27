@@ -1,242 +1,315 @@
 # StorageGRID Usage Proxy - Current Build and Validation Report
 
-## Current architecture
+## 1. Target architecture
 
-The project is a StorageGRID Tenant API usage proxy for HTTP-SNIFFER on a closed-network Splunk gateway.
-
-Runtime flow:
+The project is a small StorageGRID Tenant API usage proxy for HTTP-SNIFFER.
 
 ```text
 HTTP-SNIFFER
-    -> GET /storagegrid/usage
-StorageGRID Usage Proxy
-    -> GET /api/v4/org/usage with active bearer token
+    |
+    | GET /storagegrid/usage
+    v
+StorageGRID Usage Proxy :8787
+    |
+    | POST /api/v4/authorize
+    | GET  /api/v4/org/usage
+    v
 StorageGRID
-    -> usage JSON
-Proxy
-    -> same JSON
-HTTP-SNIFFER
-    -> Splunk event
 ```
 
-Token lifecycle:
+The proxy owns the StorageGRID bearer token in memory. It does not write the token to disk,
+does not modify HTTP-SNIFFER configuration at runtime, and does not restart HTTP-SNIFFER.
+
+Both HTTP-SNIFFER and the proxy are Docker Compose services on the same Docker host. Port
+`8787` is published so an operator on the approved network can also inspect the endpoint directly.
+
+## 2. Token lifecycle
+
+The configured normal refresh interval is exactly 10 hours:
 
 ```text
-startup
-  -> POST /api/v4/authorize
-  -> receive candidate token
-  -> validate with /api/v4/org/usage
-  -> keep validated token in RAM
+container start
+    -> authorize
+    -> validate candidate token with /api/v4/org/usage
+    -> install validated token in memory
 
 every 10 hours
-  -> authorize candidate
-  -> validate candidate
-  -> replace active token only after validation
+    -> authorize a new token
+    -> validate it
+    -> replace active token only after validation
 
-HTTP 401
-  -> reauthorize
-  -> validate replacement
-  -> retry usage once
+unexpected HTTP 401
+    -> authorize again
+    -> validate replacement
+    -> retry the usage request once
+    -> if recovery fails, use the configured retry backoff
 ```
 
-The proxy never edits HTTP-SNIFFER `conf.json`, never restarts HTTP-SNIFFER, and does not persist the bearer token.
+A normal 10-hour refresh is not replaced by a 16-hour schedule, container restart, or
+"refresh only after 401" behavior.
 
-## Confirmed environment
+## 3. Production Docker deployment
 
-- Splunk gateway native Python: **3.6.8**.
-- StorageGRID authorize endpoint: `/api/v4/authorize`.
-- StorageGRID usage endpoint: `/api/v4/org/usage`.
-- Authorization body:
-  - `accountId`
-  - `username`
-  - `password`
-  - `cookie: true`
-  - `csrfToken: false`
-- Authorization response returns the bearer token as a string in `data`.
-- StorageGRID endpoint is HTTPS.
-- Deployment target is a closed-network server with Docker available.
-- Application files remain in a dedicated folder; no `/etc` application deployment is required.
-- HTTP-SNIFFER remains a separate container/Compose project.
+Production uses a versioned image tag. `latest` is not used by Compose and is not exported
+as part of the production offline artifact.
 
-## Supported deployment methods
+`TAG` is the source of truth for the release version.
 
-### Native Python
-
-Retained as fallback/troubleshooting.
-
-- Python 3.6+ compatible.
-- Native start/status/stop scripts.
-- Optional user-crontab reboot startup.
-
-### Docker - recommended production deployment
-
-- Runtime image based on `python:3.11-slim-bookworm`.
-- `config/proxy.env` mounted read-only; credentials and `PROXY_API_KEY` are not baked
-  into image layers.
-- optional `certs/` mounted read-only.
-- `restart: unless-stopped`.
-- read-only root filesystem and dropped capabilities from `compose.yml`.
-- offline transfer with `docker save` / `docker load`.
-- Docker health uses `/readyz`; an unhealthy state does not by itself trigger
-  `restart: unless-stopped`.
-- Production non-loopback deployments require `PROXY_API_KEY` and HTTP-SNIFFER must send
-  `X-StorageGRID-Proxy-Key`.
-
-## Release versioning
-
-`TAG` is now the single source of truth for Docker image versioning in both GitHub Actions and GitLab CI.
-
-Example:
+For example:
 
 ```text
-v1.1.1
+TAG
+  v1.1.1
 ```
 
-Both CI systems use it to produce:
+produces:
 
 ```text
 storagegrid-usage-proxy:v1.1.1
-storagegrid-usage-proxy:latest
 storagegrid-usage-proxy_v1.1.1.tar
 storagegrid-usage-proxy_v1.1.1.tar.sha256
-IMAGE_VERSION.txt containing v1.1.1
+.env                         IMAGE_TAG=v1.1.1
+IMAGE_VERSION.txt            v1.1.1
+compose.yml
 ```
 
-Normal code commits do not require a `TAG` change.
-
-A deployable image should be packaged only when `TAG` changes on the default branch or when packaging is explicitly started manually.
-
-## Application verification
-
-Verified application behavior:
-
-- Python compilation: PASS.
-- Python 3.6 grammar compatibility: PASS.
-- POSIX shell syntax: PASS.
-- Placeholder runtime configuration rejection: PASS.
-- Automated suite: **44/44 PASS**.
-- `--check-config` accepts non-loopback binds only when `PROXY_API_KEY` is configured
-  or the explicit unsafe override is enabled.
-- Authorize body test: PASS.
-- v4-like token extraction from `response.data`: PASS.
-- Candidate validation before activation: PASS.
-- 10-hour background refresh behavior: PASS.
-- retry after scheduled refresh failure: PASS.
-- HTTP 401 reauthorization/retry: PASS.
-- failed 401-recovery backoff: PASS.
-- token/password non-disclosure tests: PASS.
-- proxy `/healthz`, `/readyz`, `/storagegrid/usage` endpoint tests: PASS.
-
-## GitHub Actions verification
-
-GitHub Actions is the current active CI system.
-
-Current source compatibility expectation after local container validation:
+The runtime configuration remains outside the image:
 
 ```text
-Python 3.6.15: 44/44 PASS
-Python 3.11:   44/44 PASS
+config/proxy.env
+certs/                       optional StorageGRID/internal CA material
 ```
 
-The updated 44-test suite still requires a real GitHub Actions run before it should be
-recorded as GitHub-proven.
+The image contains no StorageGRID credentials.
 
-A later Python 3.11 Docker-based test attempt encountered Docker Hub `502 Bad Gateway` **before the test container started**. This was an external image-pull failure, not an application test failure.
+## 4. Official production deployment contract
 
-The GitHub workflow was subsequently hardened:
+The production server already has Docker Engine and Docker Compose.
 
-- Python 3.6 Docker image pull: explicit retry.
-- Python 3.11 test: `actions/setup-python`, avoiding Docker Hub for that test.
-- packaging base image pull: explicit retry.
-- `docker build` uses the successfully pre-pulled local base instead of requesting another `--pull`.
-- image version read from `TAG`.
-- packaging gated behind both compatibility test jobs.
-- packaging release-driven by `TAG` change on the default branch, with manual workflow packaging also supported.
-
-The newly adjusted release-trigger behavior must receive its first CI run after the workflow update; do not record it as production-proven until that run succeeds.
-
-## GitLab CI status
-
-GitLab support is included for the planned migration/copy, but the current GitLab pipeline has not yet been proven on the future GitLab Runner.
-
-Required/current design:
-
-- Python 3.6.15 test job.
-- Python 3.11 test job.
-- both tests required before packaging.
-- version read from `TAG`.
-- package on `TAG` change on the default branch or manual pipeline.
-- Docker-in-Docker packaging.
-- explicit retry when the packaging script pulls `python:3.11-slim-bookworm`.
-- versioned + `latest` image export.
-- SHA256 checksum and `IMAGE_VERSION.txt`.
-
-### GitLab image-pull reliability
-
-GitLab Runner pulls job/service images before job scripts execute. Therefore a retry loop inside `.gitlab-ci.yml` cannot protect the initial pull of the job image itself.
-
-When the GitLab environment is prepared, use an approved resilience mechanism such as:
-
-- GitLab Dependency Proxy;
-- internal Docker registry/mirror;
-- runner pull-policy fallback/retry.
-
-This is a CI infrastructure concern and requires no application-code change.
-
-## GitLab CI validation status
-
-Confirmed locally:
-
-- `.gitlab-ci.yml` parses as YAML and defines the expected test and packaging stages.
-- The Docker-in-Docker job explicitly sets `DOCKER_HOST=tcp://docker:2375`, disables
-  `DOCKER_TLS_CERTDIR`, gives the service the `docker` alias, validates `TAG`, and
-  builds/saves both the versioned and `latest` image tags.
-- GitLab job, service, and Docker build-base image references use
-  `CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX`, so a configured GitLab Dependency Proxy
-  protects the pulls that happen before the job script as well as the retried base-image pull.
-
-Still requires a live GitLab pipeline:
-
-- Confirm the selected GitLab Runner uses the Docker executor with `privileged = true` for
-  Docker-in-Docker; this is runner configuration and cannot be granted by `.gitlab-ci.yml`.
-- Confirm the group Dependency Proxy is enabled and accessible to the runner, or replace its
-  image prefix with the approved self-hosted registry/mirror.
-- Run a normal test pipeline and a `TAG`-change/manual packaging pipeline to confirm artifact
-  upload and Docker-in-Docker behavior on that runner.
-
-## Remaining real-environment verification
-
-The following still require the real target environment:
-
-1. Real StorageGRID credentials/account ID.
-2. DNS/IP reachability from the Splunk gateway to StorageGRID.
-3. Real TLS trust from the production Docker container/gateway.
-4. HTTP-SNIFFER reachability to `<splunk-gateway-IP>:8787`.
-5. First production Docker image build/export using the chosen `TAG`.
-6. Transfer checksum verification and `docker load` on the closed gateway.
-7. Container health and live usage after deployment.
-8. First GitLab pipeline execution after the future migration.
-9. GitLab Runner Docker-in-Docker capability and chosen image-pull cache/proxy policy.
-
-## Current production recommendation
-
-Use Docker for production and keep native Python as fallback.
-
-Release process:
+Transfer:
 
 ```text
-normal source commits
-       -> tests only
-
-ready for a new deployment
-       -> update TAG
-       -> commit/push
-       -> Python 3.6 + 3.11 tests
-       -> build versioned + latest Docker image
-       -> docker save
-       -> SHA256
-       -> transfer into closed network
-       -> verify checksum
-       -> docker load
-       -> docker compose up -d --force-recreate
+storagegrid-usage-proxy_<VERSION>.tar
+storagegrid-usage-proxy_<VERSION>.tar.sha256
+.env
+IMAGE_VERSION.txt
+compose.yml
+config/proxy.env
+certs/                       only when an internal CA is required
 ```
+
+Deploy:
+
+```bash
+sha256sum -c storagegrid-usage-proxy_<VERSION>.tar.sha256
+docker load -i storagegrid-usage-proxy_<VERSION>.tar
+docker compose up -d
+```
+
+`sha256sum -c` is an integrity check. It is not required by Docker; it verifies that the
+transferred image archive matches the archive produced by CI before the archive is loaded.
+
+Compose reads `IMAGE_TAG` from `.env` and therefore starts the exact version loaded into Docker.
+
+The production server does not require Internet access and does not build the image.
+
+## 5. Compose review
+
+`compose.yml` intentionally contains one service.
+
+Confirmed design:
+
+- exact versioned image through `IMAGE_TAG`;
+- no `latest` dependency;
+- host port `8787` published for HTTP-SNIFFER and operator access;
+- runtime configuration mounted read-only;
+- optional CA directory mounted read-only;
+- read-only container filesystem;
+- all Linux capabilities dropped;
+- `no-new-privileges`;
+- `restart: unless-stopped`;
+- 15-second graceful stop period.
+
+No additional services, databases, queues, reverse proxies, or orchestration layers are required.
+
+## 6. GitLab CI review
+
+`.gitlab-ci.yml` supports both closed-network image-source options.
+
+### Option B - Internal registry (recommended)
+
+Default:
+
+```yaml
+IMAGE_PREFIX: "<registry.company.local>"
+```
+
+Required internal images:
+
+```text
+<registry.company.local>/python:3.6.15-slim-buster
+<registry.company.local>/python:3.11-slim-bookworm
+<registry.company.local>/docker:27.5.1-cli
+<registry.company.local>/docker:27.5.1-dind
+```
+
+No Internet access is required.
+
+### Option A - GitLab Dependency Proxy
+
+Set the GitLab CI/CD variable:
+
+```text
+IMAGE_PREFIX=$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX
+```
+
+The Dependency Proxy must already have access to the required images. In a completely
+air-gapped environment, those images must be imported/cached before the pipeline runs.
+
+### Runner requirement
+
+The Docker packaging job uses Docker-in-Docker. The GitLab Runner must be configured
+appropriately for that executor and must permit privileged Docker-in-Docker.
+
+This is runner infrastructure and cannot be enabled safely by `.gitlab-ci.yml` itself.
+
+The project does not invent a runner type because that is controlled by the GitLab administrator.
+
+## 7. GitLab pipeline behavior
+
+Tests:
+
+```text
+Python 3.6.15
+Python 3.11
+```
+
+Packaging:
+
+```text
+TAG changes on default branch
+OR
+manual web pipeline
+```
+
+Both tests must pass before packaging.
+
+The package job:
+
+1. reads and validates `TAG`;
+2. pulls the internal Python 3.11 base image;
+3. builds the exact versioned application image;
+4. saves that versioned image to a TAR;
+5. creates SHA256, `.env`, and `IMAGE_VERSION.txt`;
+6. publishes the deployment artifacts.
+
+No `latest` tag is required.
+
+## 8. GitHub Actions
+
+GitHub remains supported.
+
+The workflow continues to test Python 3.6.15 and Python 3.11 and builds the same versioned
+Docker artifact model. It no longer exports `latest` as part of the offline production artifact.
+
+## 9. Runtime API
+
+Operator / HTTP-SNIFFER endpoint:
+
+```text
+GET http://<server>:8787/storagegrid/usage
+```
+
+StorageGRID endpoint used internally:
+
+```text
+GET /api/v4/org/usage
+```
+
+Authorization:
+
+```text
+POST /api/v4/authorize
+```
+
+The proxy does not require an application-level API key for the local network endpoint. The
+approved closed network and host/network controls are the access boundary.
+
+## 10. TLS
+
+Normal production setting:
+
+```ini
+TLS_VERIFY=true
+CA_BUNDLE=
+```
+
+If StorageGRID uses an internal CA that is not trusted by the Python runtime, provide the
+approved CA PEM under `certs/` and configure `CA_BUNDLE` accordingly.
+
+`TLS_VERIFY=false` is not the normal production configuration.
+
+## 11. Validation performed on the supplied project
+
+The modified application compiles successfully.
+
+The application/unit test suite currently contains 32 unit tests after removing obsolete
+proxy-API-key and non-loopback authentication tests. All 32 unit tests pass in this environment.
+Two of the three end-to-end tests also pass. The remaining CLI subprocess test is blocked by
+the execution environment's Python subprocess startup behavior described below.
+
+The tests cover, among other things:
+
+- 10-hour token refresh;
+- refresh retry/backoff;
+- validation before token activation;
+- HTTP 401 reauthorization/retry;
+- failed 401 recovery backoff;
+- token extraction;
+- StorageGRID request construction;
+- response preservation;
+- placeholder configuration validation;
+- health/readiness behavior;
+- direct `/storagegrid/usage` access.
+
+The remaining end-to-end CLI subprocess test could not be completed in this execution
+environment because the child Python process does not complete startup here. The test process
+times out before the proxy's CLI test can finish. The same environment also emits an external
+artifact-tool startup timeout during Python startup. This is an execution-environment limitation,
+not a reported StorageGRID application failure.
+
+Docker Engine is not available in this execution environment, so `docker compose config`,
+`docker build`, `docker save`, and `docker load` cannot be executed here.
+
+Therefore the following remain real-environment acceptance tests rather than claims of local proof:
+
+1. Build with the actual internal registry.
+2. Run the GitLab pipeline on the actual GitLab Runner.
+3. Verify the Runner's Docker-in-Docker capability.
+4. Load the resulting TAR on the closed production server.
+5. Run `docker compose up -d`.
+6. Verify `/healthz`, `/readyz`, and `/storagegrid/usage`.
+7. Verify HTTP-SNIFFER reaches `http://<server>:8787/storagegrid/usage`.
+8. Verify the proxy reaches StorageGRID `/api/v4/org/usage`.
+9. Verify the 10-hour refresh in the real environment.
+
+## 12. Final engineering decision
+
+The project should remain intentionally small:
+
+```text
+HTTP-SNIFFER
+      |
+      v
+StorageGRID Usage Proxy
+      |
+      v
+StorageGRID Tenant API
+```
+
+No token-persistence mechanism, container restart automation, extra service, registry
+deployment layer, Kubernetes layer, or application-level proxy API key is required for
+the stated closed-network design.
+
+The remaining unknowns are infrastructure facts, not reasons to invent application code:
+the actual internal registry hostname/path and the GitLab Runner executor/configuration.

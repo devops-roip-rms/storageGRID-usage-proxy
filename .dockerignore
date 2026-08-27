@@ -24,6 +24,7 @@ build/
 *.sha256
 IMAGE_VERSION.txt
 *.zip
+.env
 *.rar
 
 # Never bake runtime credentials or private CA material into the image.

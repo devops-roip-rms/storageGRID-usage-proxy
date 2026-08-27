@@ -22,7 +22,7 @@ The proxy application logic is identical in all deployment paths.
 
 - Network access from the Splunk gateway to the StorageGRID Tenant Management API over HTTPS.
 - Network access from HTTP-SNIFFER to TCP `8787` on the Splunk gateway.
-- The five real production values in `config/proxy.env`, including the local proxy shared key.
+- The four real StorageGRID values in `config/proxy.env`.
 
 ### Native deployment
 
@@ -63,7 +63,6 @@ STORAGEGRID_BASE_URL=https://<real-storagegrid-host-or-ip>
 STORAGEGRID_USERNAME=<real-tenant-username>
 STORAGEGRID_ACCOUNT_ID=<real-tenant-account-id>
 STORAGEGRID_PASSWORD=<real-tenant-password>
-PROXY_API_KEY=<strong-local-shared-secret>
 ```
 
 The normal defaults are:
@@ -79,16 +78,11 @@ MAX_RESPONSE_BYTES=10485760
 TLS_VERIFY=true
 CA_BUNDLE=
 PROXY_BIND_HOST=0.0.0.0
-PROXY_PORT=8787
-ALLOW_UNAUTHENTICATED_NONLOOPBACK=false
-LOG_LEVEL=INFO
-```
+PROXY_PORT=8787LOG_LEVEL=INFO```
 
-`PROXY_API_KEY` is required when `PROXY_BIND_HOST` is non-loopback, including `0.0.0.0`.
-Set the same value in HTTP-SNIFFER's `X-StorageGRID-Proxy-Key` header. A non-loopback
-listener without a key fails during `--check-config` and at startup unless the operator
-deliberately sets `ALLOW_UNAUTHENTICATED_NONLOOPBACK=true`; that override is logged as
-dangerous and should only be used for an explicitly accepted insecure deployment.
+The production Docker deployment binds to `0.0.0.0:8787` so HTTP-SNIFFER and approved
+operators can reach it. `GET /storagegrid/usage` does not require an application-level
+API key; the closed network and host/network controls are the access boundary.
 
 `/readyz` returns 503 when no token is loaded or refresh failures have persisted for
 `STALE_TOKEN_WARNING_SECONDS`. The default is 900 seconds (or three retry intervals if longer).
@@ -108,7 +102,7 @@ The authorize body contains `cookie: true` and `csrfToken: false` directly in ap
 The file must contain one valid Docker tag, for example:
 
 ```text
-v1.1.1
+v1.1.0
 ```
 
 Recommended convention:
@@ -116,7 +110,7 @@ Recommended convention:
 ```text
 v1.0.0  first production release
 v1.0.1  bug fix
-v1.1.1  backward-compatible feature
+v1.1.0  backward-compatible feature
 v2.0.0  major/breaking release
 ```
 
@@ -298,7 +292,7 @@ compose.yml
 .dockerignore
 ```
 
-The Docker image contains application code and its Python runtime. It does **not** contain `config/proxy.env`, real credentials, `PROXY_API_KEY`, runtime logs, or private CA certificates.
+The Docker image contains application code and its Python runtime. It does **not** contain `config/proxy.env`, real credentials, runtime logs, or private CA certificates.
 
 Compose mounts:
 
@@ -326,7 +320,6 @@ docker pull python:3.11-slim-bookworm
 docker build \
   --build-arg APP_VERSION="$VERSION" \
   -t "storagegrid-usage-proxy:$VERSION" \
-  -t storagegrid-usage-proxy:latest \
   .
 ```
 
@@ -355,10 +348,10 @@ TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
 
 docker save \
   -o "$TAR_FILE" \
-  "storagegrid-usage-proxy:$VERSION" \
-  storagegrid-usage-proxy:latest
+  "storagegrid-usage-proxy:$VERSION"
 
 sha256sum "$TAR_FILE" > "${TAR_FILE}.sha256"
+printf 'IMAGE_TAG=%s\n' "$VERSION" > .env
 printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
 ```
 
@@ -367,17 +360,23 @@ Transfer through the approved process:
 ```text
 storagegrid-usage-proxy_<version>.tar
 storagegrid-usage-proxy_<version>.tar.sha256
+.env
 IMAGE_VERSION.txt
 compose.yml
+config/proxy.env
+certs/                         # when an internal CA is required
 ```
 
-## 8B. Load on the Splunk gateway
+## 8B. Load on the production server
 
-Verify:
+Verify the transferred image archive before loading it:
 
 ```bash
 sha256sum -c storagegrid-usage-proxy_<version>.tar.sha256
 ```
+
+This is an integrity check. It is not required by Docker, but it detects corruption or an
+unexpectedly changed TAR before it is loaded.
 
 Load:
 
@@ -391,7 +390,7 @@ Confirm:
 docker image ls storagegrid-usage-proxy
 ```
 
-The archive contains both the versioned tag and `latest`. `compose.yml` therefore remains unchanged across releases.
+The archive contains only the versioned image tag. `.env` supplies the same version to Compose.
 
 ## 9B. Start Docker deployment
 
@@ -525,7 +524,6 @@ The job:
 2. Validates the value.
 3. Pulls `python:3.11-slim-bookworm` with retry.
 4. Builds `storagegrid-usage-proxy:$VERSION`.
-5. Also tags it `storagegrid-usage-proxy:latest`.
 6. Exports both tags to one TAR.
 7. Creates SHA256 and `IMAGE_VERSION.txt`.
 8. Uploads the files as a GitHub Actions artifact.
@@ -544,7 +542,38 @@ The repository also includes:
 .gitlab-ci.yml
 ```
 
-It uses the same `TAG` file.
+It uses the same `TAG` file and supports both approved closed-network image-source options.
+
+### Option B - Internal registry (recommended)
+
+The default is:
+
+```yaml
+IMAGE_PREFIX: "<registry.company.local>"
+```
+
+The internal registry must contain these images:
+
+```text
+<registry.company.local>/python:3.6.15-slim-buster
+<registry.company.local>/python:3.11-slim-bookworm
+<registry.company.local>/docker:27.5.1-cli
+<registry.company.local>/docker:27.5.1-dind
+```
+
+This option does not require Internet access.
+
+### Option A - GitLab Dependency Proxy
+
+Set the GitLab CI/CD variable `IMAGE_PREFIX` to:
+
+```text
+$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX
+```
+
+and ensure the Dependency Proxy is enabled and the required images are available inside
+the closed GitLab environment. A completely air-gapped environment must have those images
+cached/imported before the pipeline can run.
 
 Normal pushes / merge requests:
 
@@ -567,10 +596,10 @@ It:
 
 1. Reads/validates `TAG`.
 2. Pulls the Python 3.11 Docker base with retry.
-3. Builds the versioned and `latest` image tags.
-4. Saves them to a versioned `.tar`.
-5. Generates SHA256 and `IMAGE_VERSION.txt`.
-6. Publishes the offline files as GitLab artifacts.
+3. Builds the versioned image tag.
+4. Saves the versioned image to a versioned `.tar`.
+5. Generates SHA256, `.env`, and `IMAGE_VERSION.txt`.
+6. Publishes the offline deployment files as GitLab artifacts.
 
 ## 13. GitLab Runner and image-pull reliability
 
@@ -595,13 +624,11 @@ docker:27.5.1-dind
 
 The runner pulls these **before the job script starts**. A shell retry in the job cannot protect that step.
 
-When the GitLab environment is prepared, prefer one of:
+For this project, use the internal registry option by default. The Dependency Proxy option
+is retained when the GitLab administrators prefer it and the required images are available
+inside the closed environment.
 
-1. **GitLab Dependency Proxy** for public Docker Hub images.
-2. An approved internal registry/mirror.
-3. Runner pull policy configured to retry/fall back to an already cached image.
-
-Do not change application code for any of these options; they are CI/runner infrastructure decisions.
+Do not change application code for either option; they are CI/runner infrastructure decisions.
 
 ---
 
@@ -616,8 +643,6 @@ The StorageGRID usage entry should call the proxy instead of StorageGRID directl
   "name": "StorageGRID-usage",
   "src_url": "http://<splunk-gateway-IP>:8787/storagegrid/usage",
   "dst_url": "http://<existing-splunk-gateway-destination>",
-  "src_header_name": "X-StorageGRID-Proxy-Key",
-  "src_header_value": "<SAME VALUE AS PROXY_API_KEY>",
   "dst_header_name": "",
   "dst_header_value": ""
 }
@@ -625,7 +650,8 @@ The StorageGRID usage entry should call the proxy instead of StorageGRID directl
 
 Leave the real existing `dst_url` unchanged.
 
-The proxy never edits HTTP-SNIFFER configuration at runtime.
+The proxy never edits HTTP-SNIFFER configuration at runtime. HTTP-SNIFFER should call
+`GET /storagegrid/usage`; the proxy itself calls StorageGRID `GET /api/v4/org/usage`.
 
 ## 15. Network verification
 

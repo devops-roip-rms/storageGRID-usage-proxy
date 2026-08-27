@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import os
 import ssl
@@ -35,8 +36,6 @@ def base_config(tmp: pathlib.Path) -> mod.Config:
         refresh_retry_seconds=300.0,
         bind_host="127.0.0.1",
         bind_port=8787,
-        proxy_api_key=None,
-        allow_unauthenticated_nonloopback=False,
         log_level="INFO",
     )
 
@@ -386,22 +385,6 @@ class UsageRecoveryTests(unittest.TestCase):
             self.assertEqual(json.loads(response.body), {"live": True})
 
 
-class ProxyAuthenticationTests(unittest.TestCase):
-    def test_no_proxy_key_means_local_endpoint_auth_disabled(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = base_config(pathlib.Path(td))
-            app = mod.ProxyApplication(cfg, mock.Mock(), mock.Mock(), None)
-            self.assertTrue(app.authorized(None))
-
-    def test_proxy_key_must_match(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = base_config(pathlib.Path(td))
-            app = mod.ProxyApplication(cfg, mock.Mock(), mock.Mock(), "STATIC_KEY")
-            self.assertFalse(app.authorized(None))
-            self.assertFalse(app.authorized("WRONG"))
-            self.assertTrue(app.authorized("STATIC_KEY"))
-
-
 class ConfigTests(unittest.TestCase):
     def test_default_refresh_is_ten_hours(self):
         with tempfile.TemporaryDirectory() as td:
@@ -418,33 +401,6 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.auth_path, "/api/v4/authorize")
             self.assertEqual(cfg.usage_path, "/api/v4/org/usage")
 
-    def test_loopback_detection(self):
-        self.assertTrue(mod.is_loopback_bind("127.0.0.1"))
-        self.assertTrue(mod.is_loopback_bind("::1"))
-        self.assertTrue(mod.is_loopback_bind("localhost"))
-        self.assertFalse(mod.is_loopback_bind("0.0.0.0"))
-        self.assertFalse(mod.is_loopback_bind("10.0.0.10"))
-
-    def test_loopback_without_proxy_key_is_allowed(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = base_config(pathlib.Path(td))
-            mod.validate_bind_security(cfg)
-
-    def test_non_loopback_without_proxy_key_is_rejected(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = base_config(pathlib.Path(td))
-            cfg.bind_host = "0.0.0.0"
-            with self.assertRaisesRegex(mod.ProxyError, "PROXY_API_KEY is required"):
-                mod.validate_bind_security(cfg)
-
-    def test_non_loopback_without_proxy_key_allows_explicit_override_loudly(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = base_config(pathlib.Path(td))
-            cfg.bind_host = "0.0.0.0"
-            cfg.allow_unauthenticated_nonloopback = True
-            with self.assertLogs(mod.LOG, level="WARNING") as logged:
-                mod.validate_bind_security(cfg)
-            self.assertIn("DANGEROUS OVERRIDE", "\n".join(logged.output))
 
 
 class ClientTests(unittest.TestCase):
@@ -503,7 +459,7 @@ class HTTPServerTests(unittest.TestCase):
             client.fetch_usage.return_value = usage_response()
             manager = mod.TokenManager(cfg, client)
             manager.refresh(force=True)
-            app = mod.ProxyApplication(cfg, client, manager, None)
+            app = mod.ProxyApplication(cfg, client, manager)
             server, thread = self._start_server(app)
             try:
                 base = f"http://127.0.0.1:{server.server_port}"
@@ -534,7 +490,7 @@ class HTTPServerTests(unittest.TestCase):
             with manager._state_lock:
                 manager._last_error_started_epoch = __import__("time").time() - 61
 
-            app = mod.ProxyApplication(cfg, client, manager, None)
+            app = mod.ProxyApplication(cfg, client, manager)
             server, thread = self._start_server(app)
             try:
                 base = "http://127.0.0.1:{0}".format(server.server_port)
@@ -567,7 +523,7 @@ class HTTPServerTests(unittest.TestCase):
             client.fetch_usage.side_effect = [usage_response({"validation": True}), mod.UpstreamResponse(200, raw, "application/json")]
             manager = mod.TokenManager(cfg, client)
             manager.refresh(force=True)
-            app = mod.ProxyApplication(cfg, client, manager, None)
+            app = mod.ProxyApplication(cfg, client, manager)
             server, thread = self._start_server(app)
             try:
                 url = f"http://127.0.0.1:{server.server_port}/storagegrid/usage"
@@ -581,22 +537,8 @@ class HTTPServerTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
-    def test_usage_endpoint_requires_configured_static_key(self):
-        with tempfile.TemporaryDirectory() as td:
-            cfg = base_config(pathlib.Path(td))
-            app = mod.ProxyApplication(cfg, mock.Mock(), mock.Mock(), "STATIC_KEY")
-            server, thread = self._start_server(app)
-            try:
-                url = f"http://127.0.0.1:{server.server_port}/storagegrid/usage"
-                with self.assertRaises(urllib.error.HTTPError) as ctx:
-                    urllib.request.urlopen(url, timeout=2)
-                self.assertEqual(ctx.exception.code, 401)
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=2)
 
-    def test_usage_endpoint_with_static_key_succeeds(self):
+    def test_usage_endpoint_is_directly_accessible(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = base_config(pathlib.Path(td))
             client = mock.Mock()
@@ -604,12 +546,11 @@ class HTTPServerTests(unittest.TestCase):
             client.fetch_usage.side_effect = [usage_response({"validation": True}), usage_response({"used": 10})]
             manager = mod.TokenManager(cfg, client)
             manager.refresh(force=True)
-            app = mod.ProxyApplication(cfg, client, manager, "STATIC_KEY")
+            app = mod.ProxyApplication(cfg, client, manager)
             server, thread = self._start_server(app)
             try:
                 url = f"http://127.0.0.1:{server.server_port}/storagegrid/usage"
-                request = urllib.request.Request(url, headers={"X-StorageGRID-Proxy-Key": "STATIC_KEY"})
-                with urllib.request.urlopen(request, timeout=2) as response:
+                with urllib.request.urlopen(url, timeout=2) as response:
                     body = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(body, {"used": 10})
             finally:

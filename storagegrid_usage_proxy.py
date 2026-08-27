@@ -9,8 +9,6 @@ GET endpoint that HTTP-SNIFFER can call without storing the StorageGRID token.
 """
 
 import argparse
-import hmac
-import ipaddress
 import json
 import logging
 import os
@@ -68,8 +66,6 @@ class Config(object):
         refresh_retry_seconds,
         bind_host,
         bind_port,
-        proxy_api_key,
-        allow_unauthenticated_nonloopback,
         log_level,
         stale_token_warning_seconds=None,
     ):
@@ -87,8 +83,6 @@ class Config(object):
         self.refresh_retry_seconds = refresh_retry_seconds
         self.bind_host = bind_host
         self.bind_port = bind_port
-        self.proxy_api_key = proxy_api_key
-        self.allow_unauthenticated_nonloopback = allow_unauthenticated_nonloopback
         self.log_level = log_level
         self.stale_token_warning_seconds = (
             stale_token_warning_seconds
@@ -132,7 +126,6 @@ class Config(object):
             raise ProxyError("MAX_RESPONSE_BYTES must be at least 1024")
 
         ca_bundle_raw = os.getenv("CA_BUNDLE", "").strip()
-        proxy_api_key = os.getenv("PROXY_API_KEY", "").strip() or None
 
         return cls(
             base_url=base_url,
@@ -149,10 +142,6 @@ class Config(object):
             refresh_retry_seconds=retry_seconds,
             bind_host=os.getenv("PROXY_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1",
             bind_port=port,
-            proxy_api_key=proxy_api_key,
-            allow_unauthenticated_nonloopback=env_bool(
-                "ALLOW_UNAUTHENTICATED_NONLOOPBACK", False
-            ),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
             stale_token_warning_seconds=stale_token_warning_seconds,
         )
@@ -584,45 +573,11 @@ def get_usage_with_recovery(client, manager):
         return client.fetch_usage(replacement)
 
 
-def is_loopback_bind(host):
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def validate_bind_security(cfg):
-    """Reject unauthenticated network binds unless explicitly overridden."""
-    if is_loopback_bind(cfg.bind_host) or cfg.proxy_api_key is not None:
-        return
-    if not cfg.allow_unauthenticated_nonloopback:
-        raise ProxyError(
-            "PROXY_API_KEY is required when PROXY_BIND_HOST is non-loopback; "
-            "set ALLOW_UNAUTHENTICATED_NONLOOPBACK=true only for an explicitly "
-            "accepted insecure deployment"
-        )
-    LOG.critical(
-        "DANGEROUS OVERRIDE: proxy is bound to non-loopback host %s without "
-        "PROXY_API_KEY because ALLOW_UNAUTHENTICATED_NONLOOPBACK=true",
-        cfg.bind_host,
-    )
-
-
 class ProxyApplication(object):
-    def __init__(self, cfg, client, manager, proxy_api_key):
+    def __init__(self, cfg, client, manager):
         self.cfg = cfg
         self.client = client
         self.manager = manager
-        self.proxy_api_key = proxy_api_key
-
-    def authorized(self, supplied):
-        if self.proxy_api_key is None:
-            return True
-        if supplied is None:
-            return False
-        return hmac.compare_digest(supplied, self.proxy_api_key)
 
 
 class ProxyHTTPServer(ThreadingMixIn, HTTPServer):
@@ -699,11 +654,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not_found"})
             return
 
-        supplied_key = self.headers.get("X-StorageGRID-Proxy-Key")
-        if not self.app.authorized(supplied_key):
-            self._send_json(401, {"error": "unauthorized"})
-            return
-
         try:
             response = get_usage_with_recovery(self.app.client, self.app.manager)
         except UpstreamHTTPError as exc:
@@ -726,12 +676,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
 
 def run_server(cfg):
-    validate_bind_security(cfg)
     context = build_ssl_context(cfg)
     client = StorageGridClient(cfg, context)
     manager = TokenManager(cfg, client)
 
-    app = ProxyApplication(cfg, client, manager, cfg.proxy_api_key)
+    app = ProxyApplication(cfg, client, manager)
     server = ProxyHTTPServer((cfg.bind_host, cfg.bind_port), app)
     stopping = threading.Event()
 
@@ -795,7 +744,6 @@ def main():
         cfg = Config.from_env()
 
         if args.check_config:
-            validate_bind_security(cfg)
             build_ssl_context(cfg)
             print("configuration_ok=yes")
             return 0
