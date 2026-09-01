@@ -1,708 +1,390 @@
-# StorageGRID Usage Proxy - Setup, Test, Release, and Deployment Guide
+# StorageGRID Usage Proxy - Setup and Deployment Guide
 
-This guide describes the current project version.
+This guide is the production deployment procedure for the closed-network Docker server.
 
-Supported deployment methods:
-
-- **Option A - Native Python:** fallback/troubleshooting deployment.
-- **Option B - Docker:** recommended production deployment on the Splunk gateway.
-
-Supported CI systems:
-
-- **GitHub Actions:** current active CI.
-- **GitLab CI:** retained for the planned migration/copy to GitLab.
-
-The proxy application logic is identical in all deployment paths.
-
----
+The production server does **not** need the source repository, Python source files, tests, Git metadata, CI files, or Dockerfile.
 
 ## 1. Requirements
 
-### Common
+The target server needs:
 
-- Network access from the Splunk gateway to the StorageGRID Tenant Management API over HTTPS.
-- Network access from HTTP-SNIFFER to TCP `8787` on the Splunk gateway.
-- The four real StorageGRID values in `config/proxy.env`.
+- Linux with Docker Engine;
+- Docker Compose plugin (`docker compose`);
+- network access to the StorageGRID Tenant Management API over HTTPS;
+- TCP `8787` reachable from HTTP-SNIFFER to the proxy server;
+- the approved StorageGRID/internal CA certificate;
+- the prebuilt offline Docker image TAR and its SHA256 file.
 
-### Native deployment
+Internet access is not required on the target server.
 
-- Linux server / Splunk gateway.
-- Python 3.6 or newer.
-- The application was specifically backported and tested for the gateway's Python 3.6.x environment.
-- No pip packages, Git, internet access, `/etc` application files, or system-wide application installation are required.
+## 2. Production server directory
 
-### Docker deployment
-
-- Docker Engine.
-- Docker Compose plugin.
-- The target closed-network server does **not** require internet access.
-- Build the image on a connected CI/build machine, export it with `docker save`, and transfer it as a `.tar`.
-
----
-
-## 2. Runtime configuration
-
-The runtime configuration file is:
-
-```text
-config/proxy.env
-```
-
-Keep placeholder values in the repository. Enter real credentials only in the deployment copy and do not commit them.
-
-Protect the deployment copy:
+Create a permanent deployment directory:
 
 ```bash
-chmod 600 config/proxy.env
+sudo mkdir -p /opt/storagegrid-usage-proxy/certs
+sudo chown -R "$(id -u):$(id -g)" /opt/storagegrid-usage-proxy
+cd /opt/storagegrid-usage-proxy
 ```
 
-Edit these five required production values:
+The final runtime directory should be:
+
+```text
+/opt/storagegrid-usage-proxy/
+├── compose.yml
+├── proxy.env
+└── certs/
+    └── storagegrid-ca.pem
+```
+
+The image TAR and checksum may be copied into this directory temporarily for loading, or kept in an approved transfer directory.
+
+## 3. Required `compose.yml`
+
+The production Compose file should use the already-loaded local image and mount only the runtime configuration and certificate material:
+
+```yaml
+services:
+  storagegrid-usage-proxy:
+    image: storagegrid-usage-proxy:latest
+    container_name: storagegrid-usage-proxy
+    restart: unless-stopped
+
+    ports:
+      - "8787:8787"
+
+    volumes:
+      - ./proxy.env:/app/config/proxy.env:ro
+      - ./certs:/app/certs:ro
+
+    read_only: true
+
+    tmpfs:
+      - /tmp
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    stop_grace_period: 15s
+```
+
+Important: the host-side configuration path is `./proxy.env`. Inside the container it is mounted as `/app/config/proxy.env`.
+
+## 4. Configure `proxy.env`
+
+Protect the file:
+
+```bash
+chmod 600 proxy.env
+```
+
+The five required production values are:
 
 ```ini
 STORAGEGRID_BASE_URL=https://<real-storagegrid-host-or-ip>
 STORAGEGRID_USERNAME=<real-tenant-username>
 STORAGEGRID_ACCOUNT_ID=<real-tenant-account-id>
 STORAGEGRID_PASSWORD=<real-tenant-password>
+PROXY_API_KEY=<strong-local-shared-secret>
 ```
 
-The normal defaults are:
+Keep the normal API paths and runtime defaults:
 
 ```ini
 AUTH_PATH=/api/v4/authorize
 USAGE_PATH=/api/v4/org/usage
+
 TOKEN_REFRESH_HOURS=10
 REFRESH_RETRY_SECONDS=300
-STALE_TOKEN_WARNING_SECONDS=900
+
 HTTP_TIMEOUT_SECONDS=30
 MAX_RESPONSE_BYTES=10485760
+
 TLS_VERIFY=true
-CA_BUNDLE=
+CA_BUNDLE=/app/certs/storagegrid-ca.pem
+
 PROXY_BIND_HOST=0.0.0.0
-PROXY_PORT=8787LOG_LEVEL=INFO```
+PROXY_PORT=8787
+ALLOW_UNAUTHENTICATED_NONLOOPBACK=false
 
-The production Docker deployment binds to `0.0.0.0:8787` so HTTP-SNIFFER and approved
-operators can reach it. `GET /storagegrid/usage` does not require an application-level
-API key; the closed network and host/network controls are the access boundary.
-
-`/readyz` returns 503 when no token is loaded or refresh failures have persisted for
-`STALE_TOKEN_WARNING_SECONDS`. The default is 900 seconds (or three retry intervals if longer).
-The endpoint's JSON status includes only non-sensitive refresh failure age/count fields. The
-unauthenticated `GET /metrics` JSON endpoint exposes token presence, seconds since last success,
-consecutive failure count, and a boolean error state; it never includes token, password, or error
-text.
-
-The authorize body contains `cookie: true` and `csrfToken: false` directly in application code. There is no bootstrap bearer or bootstrap CSRF configuration.
-
----
-
-## 3. Version control with `TAG`
-
-`TAG` is the release-version source for **both GitHub Actions and GitLab CI**.
-
-The file must contain one valid Docker tag, for example:
-
-```text
-v1.1.0
+LOG_LEVEL=INFO
 ```
 
-Recommended convention:
+Do not append `/api/v4/authorize` or `/api/v4/org/usage` to `STORAGEGRID_BASE_URL`.
+
+`ALLOW_UNAUTHENTICATED_NONLOOPBACK=true` is not the recommended production configuration.
+
+## 5. Install the CA certificate
+
+Copy the approved CA certificate or CA chain to:
 
 ```text
-v1.0.0  first production release
-v1.0.1  bug fix
-v1.1.0  backward-compatible feature
-v2.0.0  major/breaking release
+/opt/storagegrid-usage-proxy/certs/storagegrid-ca.pem
 ```
 
-### Release rule
-
-Normal code commits do **not** require a version change.
-
-When the code is ready to become a new deployable Docker image:
-
-1. Change `TAG`.
-2. Commit the `TAG` change with the release-ready source.
-3. Push to the default branch.
-4. CI runs both test suites.
-5. Only after the tests pass does CI build/export the offline Docker image.
-
-Example:
-
-```text
-TAG before: v1.0.0
-TAG after:  v1.0.1
-```
-
-CI must not auto-increment this file.
-
----
-
-## 4. Validate the source
-
-From the project folder:
+Set normal read permissions:
 
 ```bash
-sh scripts/setup.sh
-./scripts/check-config.sh
-./scripts/run-tests.sh
+chmod 644 certs/storagegrid-ca.pem
 ```
 
-Expected:
+The host path:
 
 ```text
-configuration_ok=yes
-Ran 44 tests
-OK
+./certs/storagegrid-ca.pem
 ```
 
-Then test the real StorageGRID endpoint:
-
-```bash
-./scripts/test-upstream.sh
-```
-
-Expected:
+is visible inside the container as:
 
 ```text
-upstream_test=ok
-usage_status=200
-usage_bytes=<number>
+/app/certs/storagegrid-ca.pem
 ```
 
-The command does not print the password or bearer token.
-
-### TLS
-
-Keep:
+Therefore `proxy.env` must contain:
 
 ```ini
 TLS_VERIFY=true
-CA_BUNDLE=
+CA_BUNDLE=/app/certs/storagegrid-ca.pem
 ```
 
-If Python reports certificate verification failure, obtain the approved StorageGRID/internal CA certificate, place it under `certs/`, and set for example:
+## 6. Transfer and verify the Docker image
 
-```ini
-CA_BUNDLE=certs/storagegrid-ca.pem
-```
-
-Do not use `TLS_VERIFY=false` as the normal production configuration.
-
----
-
-# Option A - Native Python
-
-## 5A. Start and verify
-
-```bash
-./scripts/start.sh
-./scripts/status.sh
-```
-
-Expected:
-
-```text
-status=running
-pid=<number>
-```
-
-Health/live tests:
-
-```bash
-curl http://127.0.0.1:8787/healthz
-curl http://127.0.0.1:8787/readyz
-curl http://127.0.0.1:8787/storagegrid/usage
-```
-
-Normal operations:
-
-```bash
-./scripts/start.sh
-./scripts/status.sh
-./scripts/stop.sh
-```
-
-Native log:
-
-```text
-logs/storagegrid-usage-proxy.log
-```
-
-### Native log rotation
-
-`scripts/start.sh` appends to the native log and intentionally leaves application logging
-unchanged. Install the included `copytruncate` logrotate template so the running proxy can keep
-its file descriptor open while old logs are rotated.
-
-For a system-wide installation (replace the project path only through this command):
-
-```bash
-sudo sed "s|__PROJECT_DIR__|$(pwd)|g" scripts/logrotate/storagegrid-usage-proxy \
-  | sudo tee /etc/logrotate.d/storagegrid-usage-proxy >/dev/null
-sudo logrotate -d /etc/logrotate.d/storagegrid-usage-proxy
-```
-
-Run those commands from the project directory. The installed policy rotates the log daily, keeps
-14 archives, and compresses old archives after one rotation.
-
-Without root access, install a per-user policy and invoke logrotate from the current user's cron:
-
-```bash
-mkdir -p "$HOME/.config/logrotate" "$HOME/.local/state"
-sed "s|__PROJECT_DIR__|$(pwd)|g" scripts/logrotate/storagegrid-usage-proxy \
-  > "$HOME/.config/logrotate/storagegrid-usage-proxy"
-crontab -e
-```
-
-Add this daily crontab entry, adjusting the `logrotate` path if needed:
-
-```cron
-0 0 * * * /usr/sbin/logrotate -s "$HOME/.local/state/storagegrid-usage-proxy.logrotate.status" "$HOME/.config/logrotate/storagegrid-usage-proxy"
-```
-
-## 6A. Native reboot autostart
-
-After native deployment works:
-
-```bash
-./scripts/install-autostart.sh
-```
-
-This uses the current user's `crontab @reboot` and does not install application files under `/etc`.
-
-Remove:
-
-```bash
-./scripts/remove-autostart.sh
-```
-
-Do **not** install this crontab autostart when Docker is the production deployment method. Docker uses `restart: unless-stopped`.
-
----
-
-# Option B - Docker - Recommended
-
-## 5B. Docker files
-
-The project contains:
-
-```text
-Dockerfile
-compose.yml
-.dockerignore
-```
-
-The Docker image contains application code and its Python runtime. It does **not** contain `config/proxy.env`, real credentials, runtime logs, or private CA certificates.
-
-Compose mounts:
-
-```text
-./config/proxy.env -> /app/config/proxy.env:ro
-./certs            -> /app/certs:ro
-```
-
-The current runtime base image is:
-
-```text
-python:3.11-slim-bookworm
-```
-
-## 6B. Manual connected build
-
-Normally use CI. For a manual build, read the version from `TAG`:
-
-```bash
-VERSION="$(tr -d '[:space:]' < TAG)"
-printf 'Building version %s\n' "$VERSION"
-
-docker pull python:3.11-slim-bookworm
-
-docker build \
-  --build-arg APP_VERSION="$VERSION" \
-  -t "storagegrid-usage-proxy:$VERSION" \
-  .
-```
-
-Run the source tests before export:
-
-```bash
-./scripts/run-tests.sh
-```
-
-Optional local container test:
-
-```bash
-docker compose -f compose.yml up -d
-docker compose -f compose.yml ps
-curl http://127.0.0.1:8787/readyz
-docker compose -f compose.yml down
-```
-
-This requires a valid `config/proxy.env` and StorageGRID connectivity from the test machine.
-
-## 7B. Export for the closed network
-
-```bash
-VERSION="$(tr -d '[:space:]' < TAG)"
-TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
-
-docker save \
-  -o "$TAR_FILE" \
-  "storagegrid-usage-proxy:$VERSION"
-
-sha256sum "$TAR_FILE" > "${TAR_FILE}.sha256"
-printf 'IMAGE_TAG=%s\n' "$VERSION" > .env
-printf '%s\n' "$VERSION" > IMAGE_VERSION.txt
-```
-
-Transfer through the approved process:
+Transfer the release artifacts through the approved offline process:
 
 ```text
 storagegrid-usage-proxy_<version>.tar
 storagegrid-usage-proxy_<version>.tar.sha256
-.env
-IMAGE_VERSION.txt
-compose.yml
-config/proxy.env
-certs/                         # when an internal CA is required
 ```
 
-## 8B. Load on the production server
+If `IMAGE_VERSION.txt` is supplied by CI, transfer it as well.
 
-Verify the transferred image archive before loading it:
+Verify the archive before loading:
 
 ```bash
 sha256sum -c storagegrid-usage-proxy_<version>.tar.sha256
 ```
 
-This is an integrity check. It is not required by Docker, but it detects corruption or an
-unexpectedly changed TAR before it is loaded.
+Expected result:
 
-Load:
+```text
+storagegrid-usage-proxy_<version>.tar: OK
+```
+
+Do not load an archive that fails checksum verification.
+
+## 7. Load the Docker image
 
 ```bash
 docker load -i storagegrid-usage-proxy_<version>.tar
 ```
 
-Confirm:
+Confirm the tags:
 
 ```bash
 docker image ls storagegrid-usage-proxy
 ```
 
-The archive contains only the versioned image tag. `.env` supplies the same version to Compose.
+The preferred release TAR contains both:
 
-## 9B. Start Docker deployment
+```text
+storagegrid-usage-proxy:<version>
+storagegrid-usage-proxy:latest
+```
+
+If the transferred archive contains only the versioned tag, create the `latest` tag before starting Compose:
 
 ```bash
-docker compose -f compose.yml up -d
+docker tag storagegrid-usage-proxy:<version> storagegrid-usage-proxy:latest
 ```
 
-Check:
+## 8. Start the proxy
+
+From `/opt/storagegrid-usage-proxy`:
 
 ```bash
-docker compose -f compose.yml ps
-docker inspect --format='{{.State.Health.Status}}' storagegrid-usage-proxy
+docker compose config
+docker compose up -d
 ```
 
-Logs:
+Check status:
 
 ```bash
-docker compose -f compose.yml logs -f storagegrid-usage-proxy
+docker compose ps
 ```
 
-Endpoints:
+Check logs:
 
 ```bash
-curl http://127.0.0.1:8787/healthz
-curl http://127.0.0.1:8787/readyz
-curl http://127.0.0.1:8787/storagegrid/usage
+docker compose logs --tail=100 storagegrid-usage-proxy
 ```
 
-Stop/remove:
+Do not expect the bearer token or password to appear in logs.
+
+## 9. Verify the service
+
+Process health:
 
 ```bash
-docker compose -f compose.yml down
+curl -i http://127.0.0.1:8787/healthz
 ```
 
-`restart: unless-stopped` handles process/container exits and host reboot. The Dockerfile
-health check uses `/readyz`, so a sustained 503 can mark the container `unhealthy`, but Docker
-does not restart a container merely because its health status is unhealthy. No native crontab
-autostart or outage-driven restart watchdog is required.
-
-## 10B. Upgrade Docker deployment
-
-Release flow:
-
-```text
-source changes
-     |
-     v
-tests continue on normal commits
-     |
-     v
-ready to release
-     |
-     v
-update TAG
-     |
-     v
-CI tests
-     |
-     v
-build/export new image
-     |
-     v
-transfer TAR
-     |
-     v
-docker load
-     |
-     v
-recreate proxy container
-```
-
-On the closed gateway:
+Operational readiness:
 
 ```bash
-docker load -i storagegrid-usage-proxy_<new-version>.tar
-docker compose -f compose.yml up -d --force-recreate
+curl -i http://127.0.0.1:8787/readyz
 ```
 
-This Compose project contains only the proxy, so this does not restart HTTP-SNIFFER.
+Once StorageGRID authorization succeeds, `/readyz` should return HTTP `200`.
 
----
+Test the protected usage endpoint locally:
 
-# GitHub Actions - Current CI
-
-## 11. Workflow
-
-Current workflow:
-
-```text
-.github/workflows/build-offline-image.yml
+```bash
+curl -i \
+  -H 'X-StorageGRID-Proxy-Key: <same-value-as-PROXY_API_KEY>' \
+  http://127.0.0.1:8787/storagegrid/usage
 ```
 
-### Test behavior
+A request without the correct key should not be accepted in the recommended non-loopback production configuration.
 
-Every push and pull request runs:
+## 10. Configure HTTP-SNIFFER
 
-```text
-Python 3.6.15 compatibility suite
-Python 3.11 suite
-```
+Change only the StorageGRID usage source so it calls the proxy.
 
-Expected result after local/container validation:
-
-```text
-Python 3.6.15: 44/44 PASS
-Python 3.11:   44/44 PASS
-```
-
-The updated 44-test suite still needs a real GitHub Actions run before it should be
-recorded as GitHub-proven.
-
-Python 3.6 runs in `python:3.6.15-slim-buster`. The workflow explicitly retries the Docker pull.
-
-Python 3.11 uses `actions/setup-python`, avoiding a Docker Hub pull for that test.
-
-### Packaging behavior
-
-The offline image job runs only when:
-
-```text
-TAG changes on the default branch
-OR
-the workflow is started manually
-```
-
-Both test jobs must pass first.
-
-The job:
-
-1. Reads `VERSION` from `TAG`.
-2. Validates the value.
-3. Pulls `python:3.11-slim-bookworm` with retry.
-4. Builds `storagegrid-usage-proxy:$VERSION`.
-6. Exports both tags to one TAR.
-7. Creates SHA256 and `IMAGE_VERSION.txt`.
-8. Uploads the files as a GitHub Actions artifact.
-
-A transient registry `502 Bad Gateway` during image pull is an infrastructure failure, not an application test failure. The current GitHub workflow reduces this risk with explicit pull retry; the Python 3.11 test itself no longer pulls its runtime from Docker Hub.
-
----
-
-# GitLab CI - Future Migration
-
-## 12. Pipeline
-
-The repository also includes:
-
-```text
-.gitlab-ci.yml
-```
-
-It uses the same `TAG` file and supports both approved closed-network image-source options.
-
-### Option B - Internal registry (recommended)
-
-The default is:
-
-```yaml
-IMAGE_PREFIX: "<registry.company.local>"
-```
-
-The internal registry must contain these images:
-
-```text
-<registry.company.local>/python:3.6.15-slim-buster
-<registry.company.local>/python:3.11-slim-bookworm
-<registry.company.local>/docker:27.5.1-cli
-<registry.company.local>/docker:27.5.1-dind
-```
-
-This option does not require Internet access.
-
-### Option A - GitLab Dependency Proxy
-
-Set the GitLab CI/CD variable `IMAGE_PREFIX` to:
-
-```text
-$CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX
-```
-
-and ensure the Dependency Proxy is enabled and the required images are available inside
-the closed GitLab environment. A completely air-gapped environment must have those images
-cached/imported before the pipeline can run.
-
-Normal pushes / merge requests:
-
-```text
-Python 3.6.15 tests
-Python 3.11 tests
-```
-
-Offline Docker packaging:
-
-```text
-TAG changes on default branch
-OR
-pipeline started manually
-```
-
-The packaging job must depend on both successful test jobs.
-
-It:
-
-1. Reads/validates `TAG`.
-2. Pulls the Python 3.11 Docker base with retry.
-3. Builds the versioned image tag.
-4. Saves the versioned image to a versioned `.tar`.
-5. Generates SHA256, `.env`, and `IMAGE_VERSION.txt`.
-6. Publishes the offline deployment files as GitLab artifacts.
-
-## 13. GitLab Runner and image-pull reliability
-
-The Docker packaging job uses Docker-in-Docker and requires a runner that permits privileged Docker-in-Docker.
-
-There are two different pull stages to understand:
-
-### Pulls performed inside the packaging script
-
-These can be retried in `.gitlab-ci.yml`, so the Python 3.11 Docker base should be explicitly pulled with retry before `docker build`.
-
-### Job/service images pulled by GitLab Runner
-
-Examples:
-
-```text
-python:3.6.15-slim-buster
-python:3.11-slim-bookworm
-docker:27.5.1-cli
-docker:27.5.1-dind
-```
-
-The runner pulls these **before the job script starts**. A shell retry in the job cannot protect that step.
-
-For this project, use the internal registry option by default. The Dependency Proxy option
-is retained when the GitLab administrators prefer it and the required images are available
-inside the closed environment.
-
-Do not change application code for either option; they are CI/runner infrastructure decisions.
-
----
-
-# HTTP-SNIFFER Configuration
-
-## 14. Configure HTTP-SNIFFER once
-
-The StorageGRID usage entry should call the proxy instead of StorageGRID directly:
+Example:
 
 ```json
 {
   "name": "StorageGRID-usage",
-  "src_url": "http://<splunk-gateway-IP>:8787/storagegrid/usage",
-  "dst_url": "http://<existing-splunk-gateway-destination>",
+  "src_url": "http://<proxy-server-IP>:8787/storagegrid/usage",
+  "dst_url": "<KEEP THE EXISTING REAL DESTINATION URL>",
+  "src_header_name": "X-StorageGRID-Proxy-Key",
+  "src_header_value": "<SAME VALUE AS PROXY_API_KEY>",
   "dst_header_name": "",
   "dst_header_value": ""
 }
 ```
 
-Leave the real existing `dst_url` unchanged.
+Keep the existing real `dst_url` unchanged.
 
-The proxy never edits HTTP-SNIFFER configuration at runtime. HTTP-SNIFFER should call
-`GET /storagegrid/usage`; the proxy itself calls StorageGRID `GET /api/v4/org/usage`.
+The proxy does not update HTTP-SNIFFER configuration later and does not restart HTTP-SNIFFER during bearer-token refresh.
 
-## 15. Network verification
+## 11. Verify from HTTP-SNIFFER's network context
 
-Because HTTP-SNIFFER is a separate container/Compose project, verify from its own network context that it can reach:
+If HTTP-SNIFFER runs in Docker, do not test with `127.0.0.1` from inside that container unless the proxy is in the same container/network namespace.
+
+Verify that HTTP-SNIFFER can reach:
 
 ```text
-http://<splunk-gateway-IP>:8787/storagegrid/usage
+http://<proxy-server-IP>:8787/storagegrid/usage
 ```
 
-`PROXY_BIND_HOST=0.0.0.0` is the packaged default for this deployment model.
-
----
-
-# Token Behavior
-
-## 16. Automatic 10-hour logic
-
-On process/container start:
+and that it sends:
 
 ```text
-immediate authorize
-    -> validate candidate with /api/v4/org/usage
+X-StorageGRID-Proxy-Key: <shared key>
+```
+
+## 12. Token behavior
+
+On container start:
+
+```text
+POST /api/v4/authorize
+    -> candidate bearer token
+    -> validate with GET /api/v4/org/usage
     -> install token in RAM only
 ```
 
-Then:
+Normal refresh:
 
 ```text
-wait 10 hours
-    -> authorize new candidate
+wait configured interval
+    -> authorize candidate
     -> validate candidate
-    -> only then replace active in-memory token
+    -> replace active token only after validation
 ```
 
 If scheduled refresh fails:
 
 ```text
-keep previous token
-wait 300 seconds
+keep previous working token
+wait REFRESH_RETRY_SECONDS
 retry
 ```
 
-If a live usage call receives HTTP 401:
+If live usage returns HTTP `401`:
 
 ```text
-reauthorize immediately
+reauthorize
 validate replacement
-retry usage once
+retry the usage request once
 ```
 
-Concurrent HTTP 401 responses for the same active token trigger only one reauthorization;
-the remaining requests reuse the validated replacement token.
+The dynamic StorageGRID bearer token must not be written to `proxy.env`, HTTP-SNIFFER configuration, logs, a database, or a runtime token file.
 
-No bearer token is written to `conf.json`, `proxy.env`, a database, or another runtime file.
+## 13. Restart and reboot behavior
+
+Compose uses:
+
+```yaml
+restart: unless-stopped
+```
+
+This restarts the container after a process failure or host reboot according to Docker restart-policy behavior.
+
+A container becoming `unhealthy` does not by itself cause `restart: unless-stopped` to restart it.
+
+## 14. Upgrade procedure
+
+Transfer the new release TAR and SHA256 file, then:
+
+```bash
+cd /opt/storagegrid-usage-proxy
+sha256sum -c storagegrid-usage-proxy_<new-version>.tar.sha256
+docker load -i storagegrid-usage-proxy_<new-version>.tar
+docker compose up -d --force-recreate
+```
+
+Verify again:
+
+```bash
+docker compose ps
+curl -i http://127.0.0.1:8787/healthz
+curl -i http://127.0.0.1:8787/readyz
+```
+
+This Compose project should contain only the StorageGRID Usage Proxy, so recreating it does not restart HTTP-SNIFFER.
+
+## 15. Stop/remove the proxy
+
+```bash
+cd /opt/storagegrid-usage-proxy
+docker compose down
+```
+
+This removes the proxy container only. It does not delete the locally loaded image, `proxy.env`, or the CA certificate.
+
+## 16. Production deployment checklist
+
+- Docker Engine is running.
+- Docker Compose plugin is available.
+- `compose.yml` is present.
+- `proxy.env` is present and mode `600`.
+- `certs/storagegrid-ca.pem` is present.
+- `TLS_VERIFY=true`.
+- `CA_BUNDLE=/app/certs/storagegrid-ca.pem`.
+- `PROXY_API_KEY` is configured.
+- `ALLOW_UNAUTHENTICATED_NONLOOPBACK=false`.
+- TAR checksum passes.
+- Docker image loads successfully.
+- `storagegrid-usage-proxy:latest` exists locally.
+- Container starts.
+- `/healthz` is HTTP `200`.
+- `/readyz` becomes HTTP `200` after authorization.
+- Protected `/storagegrid/usage` returns live StorageGRID usage.
+- HTTP-SNIFFER can reach the proxy.
+- HTTP-SNIFFER sends `X-StorageGRID-Proxy-Key`.
+- Splunk receives the expected event.

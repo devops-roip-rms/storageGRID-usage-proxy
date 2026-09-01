@@ -8,7 +8,7 @@ services:
       - "8787:8787"
 
     volumes:
-      - ./config/proxy.env:/app/config/proxy.env:ro
+      - ./proxy.env:/app/config/proxy.env:ro
       - ./certs:/app/certs:ro
 
     read_only: true
