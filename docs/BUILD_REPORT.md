@@ -53,7 +53,7 @@ Docker is the recommended production deployment.
 The production server runtime bundle is intentionally separate from the source repository:
 
 ```text
-/opt/storagegrid-usage-proxy/
+/mnt/storagegrid-usage-proxy/
 ├── compose.yml
 ├── proxy.env
 └── certs/

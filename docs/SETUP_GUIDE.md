@@ -23,14 +23,14 @@ Create a permanent deployment directory:
 
 ```bash
 sudo mkdir -p /opt/storagegrid-usage-proxy/certs
-sudo chown -R "$(id -u):$(id -g)" /opt/storagegrid-usage-proxy
-cd /opt/storagegrid-usage-proxy
+sudo chown -R "$(id -u):$(id -g)" /mnt/storagegrid-usage-proxy
+cd /mnt/storagegrid-usage-proxy
 ```
 
 The final runtime directory should be:
 
 ```text
-/opt/storagegrid-usage-proxy/
+/mnt/storagegrid-usage-proxy/
 ├── compose.yml
 ├── proxy.env
 └── certs/
