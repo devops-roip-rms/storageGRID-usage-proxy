@@ -11,19 +11,19 @@ variables:
 
 test:python36:
   stage: test
-  image: "cr.io:5000/python:3.6.15-slim-buster"
+  image: "python:3.6.15-slim-buster"
   script:
     - python -m unittest discover -s tests -v
 
 test:python311:
   stage: test
-  image: "cr.io:5000/python:3.11-slim-bookworm"
+  image: "python:3.11-slim-bookworm"
   script:
     - python -m unittest discover -s tests -v
 
 package:docker-offline:
   stage: package
-  image: "cr.io:5000/docker:27.5.1-cli"
+  image: "docker:27.5.1-cli"
   needs:
     - test:python36
     - test:python311
