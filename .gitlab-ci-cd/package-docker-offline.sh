@@ -23,7 +23,7 @@ if [ -z "${IMAGE_NAME:-}" ]; then
     exit 1
 fi
 
-BASE_IMAGE="${BASE_IMAGE:-cr.io:5000/python:3.11-slim-bookworm}"
+BASE_IMAGE="${BASE_IMAGE:python:3.11-slim-bookworm}"
 TAR_FILE="storagegrid-usage-proxy_${VERSION}.tar"
 
 echo "Building Docker image:"

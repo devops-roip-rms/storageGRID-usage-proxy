@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-BASE_IMAGE="${BASE_IMAGE:-cr.io:5000/python:3.11-slim-bookworm}"
+BASE_IMAGE="${BASE_IMAGE:python:3.11-slim-bookworm}"
 
 for attempt in 1 2 3 4 5; do
     echo "Docker pull attempt $attempt/5: $BASE_IMAGE"
