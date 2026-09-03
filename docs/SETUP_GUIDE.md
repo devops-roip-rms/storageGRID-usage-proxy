@@ -260,8 +260,8 @@ Example:
   "name": "StorageGRID-usage",
   "src_url": "http://<proxy-server-IP>:8787/storagegrid/usage",
   "dst_url": "<KEEP THE EXISTING REAL DESTINATION URL>",
-  "src_header_name": "X-StorageGRID-Proxy-Key",
-  "src_header_value": "<SAME VALUE AS PROXY_API_KEY>",
+  "src_header_name": "",
+  "src_header_value": "",
   "dst_header_name": "",
   "dst_header_value": ""
 }
