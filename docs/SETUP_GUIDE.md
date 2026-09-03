@@ -22,7 +22,7 @@ Internet access is not required on the target server.
 Create a permanent deployment directory:
 
 ```bash
-sudo mkdir -p /opt/storagegrid-usage-proxy/certs
+sudo mkdir -p /mnt/storagegrid-usage-proxy/certs
 sudo chown -R "$(id -u):$(id -g)" /mnt/storagegrid-usage-proxy
 cd /mnt/storagegrid-usage-proxy
 ```
@@ -122,7 +122,7 @@ Do not append `/api/v4/authorize` or `/api/v4/org/usage` to `STORAGEGRID_BASE_UR
 Copy the approved CA certificate or CA chain to:
 
 ```text
-/opt/storagegrid-usage-proxy/certs/storagegrid-ca.pem
+/mnt/storagegrid-usage-proxy/certs/storagegrid-ca.pem
 ```
 
 Set normal read permissions:
@@ -202,7 +202,7 @@ docker tag storagegrid-usage-proxy:<version> storagegrid-usage-proxy:latest
 
 ## 8. Start the proxy
 
-From `/opt/storagegrid-usage-proxy`:
+From `/mnt/storagegrid-usage-proxy`:
 
 ```bash
 docker compose config
@@ -342,7 +342,7 @@ A container becoming `unhealthy` does not by itself cause `restart: unless-stopp
 Transfer the new release TAR and SHA256 file, then:
 
 ```bash
-cd /opt/storagegrid-usage-proxy
+cd /mnt/storagegrid-usage-proxy
 sha256sum -c storagegrid-usage-proxy_<new-version>.tar.sha256
 docker load -i storagegrid-usage-proxy_<new-version>.tar
 docker compose up -d --force-recreate
@@ -361,7 +361,7 @@ This Compose project should contain only the StorageGRID Usage Proxy, so recreat
 ## 15. Stop/remove the proxy
 
 ```bash
-cd /opt/storagegrid-usage-proxy
+cd /mnt/storagegrid-usage-proxy
 docker compose down
 ```
 

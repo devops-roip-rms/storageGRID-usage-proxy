@@ -8,8 +8,8 @@ services:
       - "8787:8787"
 
     volumes:
-      - ./proxy.env:/app/config/proxy.env:ro
-      - ./certs:/app/certs:ro
+      - /mnt/storagegrid-uage-proxy/proxy.env:/app/config/proxy.env:ro
+      - /mnt/storagegrid-uage-proxy/certs:/app/certs:ro
 
     read_only: true
     tmpfs:
